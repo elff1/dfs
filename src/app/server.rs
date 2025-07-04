@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
-    select,
     sync::Mutex,
     task::{JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
+
+use super::P2pService;
 
 #[derive(Debug, Error)]
 #[allow(dead_code)] // Remove this line if you plan to use all variants
@@ -31,7 +33,13 @@ pub type ServerResult<T> = std::result::Result<T, Error>;
 
 pub struct Server {
     cancel_token: CancellationToken,
-    subtasks: Arc<Mutex<JoinSet<()>>>,
+    subtasks: Arc<Mutex<JoinSet<Result<(), Error>>>>,
+}
+
+#[async_trait]
+pub trait Service: Send + Sync + 'static {
+    async fn start(&self, cancel_token: CancellationToken) -> Result<(), Error>;
+    //async fn stop(&self) -> Result<(), Error>;
 }
 
 impl Server {
@@ -43,21 +51,32 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-        let mut join_set = self.subtasks.lock().await;
+        let p2p_service = P2pService::new();
+        self.spawn_task(p2p_service).await?;
 
+        // let mut subtasks = self.subtasks.lock().await;
+        // let cancel_token = self.cancel_token.clone();
+        // subtasks.spawn(async move {
+        //     loop {
+        //         select! {
+        //             _ = cancel_token.cancelled() => {
+        //                 println!("Stopping tasks...");
+        //                 break;
+        //             }
+        //             // Placeholder for handling incoming requests
+        //             // This would typically involve listening on a socket and processing requests
+        //         }
+        //     }
+        //     Ok(())
+        // });
+
+        Ok(())
+    }
+
+    pub async fn spawn_task<S: Service>(&self, service: S) -> ServerResult<()> {
+        let mut subtasks = self.subtasks.lock().await;
         let cancel_token = self.cancel_token.clone();
-        join_set.spawn(async move {
-            loop {
-                select! {
-                    _ = cancel_token.cancelled() => {
-                        println!("Stopping tasks...");
-                        break;
-                    }
-                    // Placeholder for handling incoming requests
-                    // This would typically involve listening on a socket and processing requests
-                }
-            }
-        });
+        subtasks.spawn(async move { service.start(cancel_token).await });
 
         Ok(())
     }
@@ -67,7 +86,7 @@ impl Server {
         self.cancel_token.cancel();
         let mut subtasks = self.subtasks.lock().await;
         while let Some(res) = subtasks.join_next().await {
-            res?;
+            res??;
         }
         Ok(())
     }

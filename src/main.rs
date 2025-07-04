@@ -9,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
         let _ = term_tx.send(());
     })?;
 
-    let server = app::server::Server::new();
+    let server = app::Server::new();
     server.start().await?;
 
     term_rx.recv()?;
