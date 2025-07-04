@@ -1,0 +1,13 @@
+[package]
+name = "dfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+ctrlc = { version = "3.4", features = ["termination"] }
+libp2p = { version = "0.56.0", features = ["full"] }
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1.0", features = ["derive"] }
