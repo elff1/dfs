@@ -4,15 +4,16 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
     sync::Mutex,
-    task::{JoinError, JoinSet},
+    task::{JoinError, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
 
-use super::P2pService;
+use super::config::P2pServiceConfig;
+use super::service::{P2pNetworkError, P2pService};
 
 #[derive(Debug, Error)]
 #[allow(dead_code)] // Remove this line if you plan to use all variants
-pub enum Error {
+pub enum ServerError {
     #[error("Failed to bind to address: {0}")]
     Bind(String),
 
@@ -27,18 +28,21 @@ pub enum Error {
 
     #[error("Task join error: {0}")]
     TaskJoin(#[from] JoinError),
+
+    #[error("P2P network error: {0}")]
+    P2pNetwork(#[from] P2pNetworkError),
 }
 
-pub type ServerResult<T> = std::result::Result<T, Error>;
+pub type ServerResult<T> = std::result::Result<T, ServerError>;
 
 pub struct Server {
     cancel_token: CancellationToken,
-    subtasks: Arc<Mutex<JoinSet<Result<(), Error>>>>,
+    subtasks: Arc<Mutex<Vec<JoinHandle<Result<(), ServerError>>>>>,
 }
 
 #[async_trait]
 pub trait Service: Send + Sync + 'static {
-    async fn start(&self, cancel_token: CancellationToken) -> Result<(), Error>;
+    async fn start(&self, cancel_token: CancellationToken) -> Result<(), ServerError>;
     //async fn stop(&self) -> Result<(), Error>;
 }
 
@@ -46,12 +50,16 @@ impl Server {
     pub fn new() -> Self {
         Self {
             cancel_token: CancellationToken::new(),
-            subtasks: Arc::new(Mutex::new(JoinSet::new())),
+            subtasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-        let p2p_service = P2pService::new();
+        let p2p_service = P2pService::new(
+            P2pServiceConfig::builder()
+                .with_keypair_file("./keys.keypair")
+                .build(),
+        );
         self.spawn_task(p2p_service).await?;
 
         // let mut subtasks = self.subtasks.lock().await;
@@ -76,18 +84,22 @@ impl Server {
     pub async fn spawn_task<S: Service>(&self, service: S) -> ServerResult<()> {
         let mut subtasks = self.subtasks.lock().await;
         let cancel_token = self.cancel_token.clone();
-        subtasks.spawn(async move { service.start(cancel_token).await });
+        subtasks.push(tokio::spawn(
+            async move { service.start(cancel_token).await },
+        ));
 
         Ok(())
     }
 
     pub async fn stop(&self) -> ServerResult<()> {
         println!("Shutting down server...");
+
         self.cancel_token.cancel();
         let mut subtasks = self.subtasks.lock().await;
-        while let Some(res) = subtasks.join_next().await {
-            res??;
+        for subtask in subtasks.iter_mut() {
+            subtask.await??;
         }
+
         Ok(())
     }
 }
