@@ -4,6 +4,8 @@ mod app;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let (term_tx, term_rx) = channel();
     ctrlc::set_handler(move || {
         let _ = term_tx.send(());

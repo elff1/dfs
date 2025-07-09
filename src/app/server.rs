@@ -8,8 +8,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::config::P2pServiceConfig;
-use super::service::{P2pNetworkError, P2pService};
+use super::{
+    config::P2pServiceConfig,
+    service::{P2pNetworkError, P2pService},
+};
+
+const LOG_TARGET: &str = "app::server";
 
 #[derive(Debug, Error)]
 #[allow(dead_code)] // Remove this line if you plan to use all variants
@@ -35,9 +39,11 @@ pub enum ServerError {
 
 pub type ServerResult<T> = std::result::Result<T, ServerError>;
 
+type SubtaskHandle = JoinHandle<Result<(), ServerError>>;
+
 pub struct Server {
     cancel_token: CancellationToken,
-    subtasks: Arc<Mutex<Vec<JoinHandle<Result<(), ServerError>>>>>,
+    subtasks: Arc<Mutex<Vec<SubtaskHandle>>>,
 }
 
 #[async_trait]
@@ -62,22 +68,6 @@ impl Server {
         );
         self.spawn_task(p2p_service).await?;
 
-        // let mut subtasks = self.subtasks.lock().await;
-        // let cancel_token = self.cancel_token.clone();
-        // subtasks.spawn(async move {
-        //     loop {
-        //         select! {
-        //             _ = cancel_token.cancelled() => {
-        //                 println!("Stopping tasks...");
-        //                 break;
-        //             }
-        //             // Placeholder for handling incoming requests
-        //             // This would typically involve listening on a socket and processing requests
-        //         }
-        //     }
-        //     Ok(())
-        // });
-
         Ok(())
     }
 
@@ -92,7 +82,7 @@ impl Server {
     }
 
     pub async fn stop(&self) -> ServerResult<()> {
-        println!("Shutting down server...");
+        log::info!(target: LOG_TARGET, "Shutting down server...");
 
         self.cancel_token.cancel();
         let mut subtasks = self.subtasks.lock().await;
