@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use super::super::{ServerError, Service};
 use super::config::P2pServiceConfig;
 
-const LOG_TARGET: &str = "app::p2p::P2pService";
+const LOG_TARGET: &str = "app::p2p::service";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileChunkRequest {

@@ -14,3 +14,8 @@ async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
+tonic = "0.13"
+prost = "0.13" # should be the same version as tonic
+
+[build-dependencies]
+tonic-build = "*"

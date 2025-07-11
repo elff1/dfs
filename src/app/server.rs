@@ -9,11 +9,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    config::P2pServiceConfig,
-    service::{P2pNetworkError, P2pService},
+    grpc::service::{GrpcService, GrpcServiceError},
+    p2p::{
+        config::P2pServiceConfig,
+        service::{P2pNetworkError, P2pService},
+    },
 };
 
 const LOG_TARGET: &str = "app::server";
+const GRPC_PORT: u16 = 29999;
 
 #[derive(Debug, Error)]
 #[allow(dead_code)] // Remove this line if you plan to use all variants
@@ -35,6 +39,9 @@ pub enum ServerError {
 
     #[error("P2P network error: {0}")]
     P2pNetwork(#[from] P2pNetworkError),
+
+    #[error("gRPC service error: {0}")]
+    GrpcService(#[from] GrpcServiceError),
 }
 
 pub type ServerResult<T> = std::result::Result<T, ServerError>;
@@ -67,6 +74,9 @@ impl Server {
                 .build(),
         );
         self.spawn_task(p2p_service).await?;
+
+        let grpc_service = GrpcService::new(GRPC_PORT);
+        self.spawn_task(grpc_service).await?;
 
         Ok(())
     }
