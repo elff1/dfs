@@ -1,6 +1,7 @@
 use std::sync::mpsc::channel;
 
 mod app;
+mod file_processor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

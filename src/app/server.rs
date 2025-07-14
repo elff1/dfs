@@ -68,6 +68,7 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
+        // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file("./keys.keypair")
@@ -75,6 +76,7 @@ impl Server {
         );
         self.spawn_task(p2p_service).await?;
 
+        // gRPC service
         let grpc_service = GrpcService::new(GRPC_PORT);
         self.spawn_task(grpc_service).await?;
 

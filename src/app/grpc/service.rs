@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, transport::Server};
 
 use crate::app::{ServerError, Service};
+use crate::file_processor::FileProcessor;
 
 const LOG_TARGET: &str = "app::grpc::service";
 
@@ -40,10 +41,26 @@ impl Publish for PublishService {
     ) -> Result<Response<PublishFileResponse>, Status> {
         log::info!(target: LOG_TARGET, "Got publish request: {request:?}");
 
-        Ok(Response::new(PublishFileResponse {
-            success: true,
-            error: "".to_string(),
-        }))
+        match FileProcessor::publish_file(&request.get_ref().file_path).await {
+            Ok(result) => {
+                log::info!(target: LOG_TARGET, "File processing result: {result:?}");
+                
+                Ok(Response::new(PublishFileResponse {
+                    success: true,
+                    error: "".to_string(),
+                }))
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+
+                log::error!(target: LOG_TARGET, "Publish file failed: {err_msg}");
+
+                Ok(Response::new(PublishFileResponse {
+                    success: false,
+                    error: err_msg,
+                }))
+            }
+        }
     }
 }
 
