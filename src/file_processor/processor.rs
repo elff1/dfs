@@ -4,6 +4,7 @@ use std::{
 };
 
 use rs_merkle::{Hasher, MerkleTree, algorithms::Sha256};
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
     io::{self, AsyncReadExt, AsyncWriteExt},
@@ -12,7 +13,9 @@ use tokio::{
 const LOG_TARGET: &str = "file_processor::processor";
 const CHUNK_SIZE: usize = 1024 * 1024;
 
-#[derive(Debug)]
+pub const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessorResult {
     pub original_file_name: String,
     pub number_of_chunks: u64,
@@ -66,7 +69,7 @@ async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
         ))?;
     let mut chunk_dir = components.as_path().to_path_buf();
     chunk_dir.push(format!("chunks_{}", file_name.replace(".", "_")));
-    fs::remove_dir_all(&chunk_dir).await?;
+    fs::remove_dir_all(&chunk_dir).await.unwrap_or_default();
     fs::create_dir_all(&chunk_dir).await?;
 
     log::info!(target: LOG_TARGET, "Chunk dir: {}", chunk_dir.display());
@@ -112,11 +115,19 @@ async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
         .root()
         .ok_or(io::Error::other("can not get Merkle root"))?;
 
-    Ok(FileProcessorResult::new(
+    let result = FileProcessorResult::new(
         file_name,
         chunk_index,
         chunk_dir,
         merkle_root,
         merkle_leaves,
-    ))
+    );
+
+    let cbor_file = fs::File::create(result.chunks_dirctory.join(PROCESSING_RESULT_FILE_NAME))
+        .await?
+        .into_std()
+        .await;
+    serde_cbor::to_writer(cbor_file, &result).map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(result)
 }
