@@ -43,8 +43,9 @@ impl Publish for PublishService {
 
         match FileProcessor::publish_file(&request.get_ref().file_path).await {
             Ok(result) => {
-                log::info!(target: LOG_TARGET, "File processing result: {result:?}");
-                
+                log::info!(target: LOG_TARGET, "File processing result: file[{}], hash[{}]",
+                    result.original_file_name, hex::encode(result.merkle_root));
+
                 Ok(Response::new(PublishFileResponse {
                     success: true,
                     error: "".to_string(),

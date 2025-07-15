@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use rs_merkle::{Hasher, MerkleTree, algorithms::Sha256};
 use tokio::{
     fs::{self, File},
     io::{self, AsyncReadExt, AsyncWriteExt},
@@ -13,9 +14,11 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub struct FileProcessorResult {
-    original_file_name: String,
-    number_of_chunks: u64,
-    chunks_dirctory: PathBuf,
+    pub original_file_name: String,
+    pub number_of_chunks: u64,
+    pub chunks_dirctory: PathBuf,
+    pub merkle_root: [u8; 32],
+    pub merkle_leaves: Vec<[u8; 32]>,
 }
 
 impl FileProcessorResult {
@@ -23,11 +26,15 @@ impl FileProcessorResult {
         original_file_name: String,
         number_of_chunks: u64,
         chunks_dirctory: PathBuf,
+        merkle_root: [u8; 32],
+        merkle_leaves: Vec<[u8; 32]>,
     ) -> Self {
         Self {
             original_file_name,
             number_of_chunks,
             chunks_dirctory,
+            merkle_root,
+            merkle_leaves,
         }
     }
 }
@@ -59,12 +66,14 @@ async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
         ))?;
     let mut chunk_dir = components.as_path().to_path_buf();
     chunk_dir.push(format!("chunks_{}", file_name.replace(".", "_")));
+    fs::remove_dir_all(&chunk_dir).await?;
     fs::create_dir_all(&chunk_dir).await?;
 
     log::info!(target: LOG_TARGET, "Chunk dir: {}", chunk_dir.display());
 
     let mut file = File::open(file_path).await?;
     let mut chunk_index = 0;
+    let mut merkle_leaves = vec![];
 
     // Use MaybeUninit to avoid initializing the buffer
     let mut buf: Vec<MaybeUninit<u8>> = Vec::with_capacity(CHUNK_SIZE);
@@ -89,6 +98,8 @@ async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
         }
 
         chunk_index += 1;
+        merkle_leaves.push(Sha256::hash(&buf[..buf_offset]));
+
         // Why does `fs::write(&chunk_path, &buf[..buf_offset]).await?;` turn `buf` into `OwnedBuf` first, while `File::write_all()` doesn't?
         let mut chunk_file = File::create(chunk_dir.join(format!("chunk_{chunk_index}"))).await?;
         chunk_file.write_all(&buf[..buf_offset]).await?;
@@ -97,5 +108,15 @@ async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
         buf_offset = 0;
     }
 
-    Ok(FileProcessorResult::new(file_name, chunk_index, chunk_dir))
+    let merkle_root = MerkleTree::<Sha256>::from_leaves(&merkle_leaves)
+        .root()
+        .ok_or(io::Error::other("can not get Merkle root"))?;
+
+    Ok(FileProcessorResult::new(
+        file_name,
+        chunk_index,
+        chunk_dir,
+        merkle_root,
+        merkle_leaves,
+    ))
 }
