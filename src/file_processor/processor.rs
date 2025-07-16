@@ -1,4 +1,5 @@
 use std::{
+    hash::Hash,
     mem::MaybeUninit,
     path::{Path, PathBuf},
 };
@@ -9,6 +10,8 @@ use tokio::{
     fs::{self, File},
     io::{self, AsyncReadExt, AsyncWriteExt},
 };
+
+use crate::app::grpc::publish;
 
 const LOG_TARGET: &str = "file_processor::processor";
 const CHUNK_SIZE: usize = 1024 * 1024;
@@ -22,6 +25,7 @@ pub struct FileProcessorResult {
     pub chunks_dirctory: PathBuf,
     pub merkle_root: [u8; 32],
     pub merkle_leaves: Vec<[u8; 32]>,
+    pub public: bool,
 }
 
 impl FileProcessorResult {
@@ -31,6 +35,7 @@ impl FileProcessorResult {
         chunks_dirctory: PathBuf,
         merkle_root: [u8; 32],
         merkle_leaves: Vec<[u8; 32]>,
+        public: bool,
     ) -> Self {
         Self {
             original_file_name,
@@ -38,7 +43,17 @@ impl FileProcessorResult {
             chunks_dirctory,
             merkle_root,
             merkle_leaves,
+            public,
         }
+    }
+}
+
+impl Hash for FileProcessorResult {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.original_file_name.hash(state);
+        self.number_of_chunks.hash(state);
+        self.merkle_root.hash(state);
+        self.public.hash(state);
     }
 }
 
@@ -46,19 +61,23 @@ pub struct FileProcessor();
 
 //#[tonic::async_trait]
 impl FileProcessor {
-    pub async fn publish_file<P: AsRef<Path>>(file: P) -> io::Result<FileProcessorResult> {
-        let file = file.as_ref();
+    pub async fn publish_file(
+        request: publish::PublishFileRequest,
+    ) -> io::Result<FileProcessorResult> {
+        let file = PathBuf::from(request.file_path);
+        let public = request.public;
+
         log::debug!(target: LOG_TARGET, "Start publish: {}", file.display());
 
-        if fs::metadata(file).await?.is_dir() {
+        if fs::metadata(&file).await?.is_dir() {
             todo!();
         } else {
-            publish_one_file(file).await
+            publish_one_file(&file, public).await
         }
     }
 }
 
-async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
+async fn publish_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessorResult> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()
@@ -121,6 +140,7 @@ async fn publish_one_file(file_path: &Path) -> io::Result<FileProcessorResult> {
         chunk_dir,
         merkle_root,
         merkle_leaves,
+        public,
     );
 
     let cbor_file = fs::File::create(result.chunks_dirctory.join(PROCESSING_RESULT_FILE_NAME))

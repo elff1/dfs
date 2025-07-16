@@ -3,12 +3,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, mpsc},
     task::{JoinError, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    super::file_processor::FileProcessorResult,
     grpc::service::{GrpcService, GrpcServiceError},
     p2p::{
         config::P2pServiceConfig,
@@ -55,7 +56,7 @@ pub struct Server {
 
 #[async_trait]
 pub trait Service: Send + Sync + 'static {
-    async fn start(&self, cancel_token: CancellationToken) -> Result<(), ServerError>;
+    async fn start(self, cancel_token: CancellationToken) -> Result<(), ServerError>;
     //async fn stop(&self) -> Result<(), Error>;
 }
 
@@ -68,16 +69,19 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
+        let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessorResult>(100);
+
         // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file("./keys.keypair")
                 .build(),
+            file_publish_rx,
         );
         self.spawn_task(p2p_service).await?;
 
         // gRPC service
-        let grpc_service = GrpcService::new(GRPC_PORT);
+        let grpc_service = GrpcService::new(GRPC_PORT, file_publish_tx);
         self.spawn_task(grpc_service).await?;
 
         Ok(())

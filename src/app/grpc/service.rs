@@ -1,16 +1,19 @@
 use std::net::AddrParseError;
 
 use async_trait::async_trait;
-use publish::{
-    PublishFileRequest, PublishFileResponse,
-    publish_server::{Publish, PublishServer},
-};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, transport::Server};
 
-use crate::app::{ServerError, Service};
-use crate::file_processor::FileProcessor;
+use super::publish::{
+    PublishFileRequest, PublishFileResponse,
+    publish_server::{Publish, PublishServer},
+};
+use crate::{
+    app::{ServerError, Service},
+    file_processor::{FileProcessor, FileProcessorResult},
+};
 
 const LOG_TARGET: &str = "app::grpc::service";
 
@@ -20,16 +23,14 @@ pub enum GrpcServiceError {
     SocketAddrParse(#[from] AddrParseError),
 }
 
-pub mod publish {
-    tonic::include_proto!("publish");
+#[derive(Debug)]
+struct PublishService {
+    file_publish_tx: mpsc::Sender<FileProcessorResult>,
 }
 
-#[derive(Debug)]
-pub struct PublishService {}
-
 impl PublishService {
-    pub fn new() -> Self {
-        PublishService {}
+    pub fn new(file_publish_tx: mpsc::Sender<FileProcessorResult>) -> Self {
+        PublishService { file_publish_tx }
     }
 }
 
@@ -39,48 +40,55 @@ impl Publish for PublishService {
         &self,
         request: Request<PublishFileRequest>,
     ) -> Result<Response<PublishFileResponse>, Status> {
-        log::info!(target: LOG_TARGET, "Got publish request: {request:?}");
+        let request_str = format!("{request:?}");
+        log::info!(target: LOG_TARGET, "Got publish request: {request_str}");
 
-        match FileProcessor::publish_file(&request.get_ref().file_path).await {
+        let err_msg = match FileProcessor::publish_file(request.into_inner()).await {
             Ok(result) => {
-                log::info!(target: LOG_TARGET, "File processing result: file[{}], hash[{}]",
+                log::info!(target: LOG_TARGET, "File process result: file[{}], hash[{}]",
                     result.original_file_name, hex::encode(result.merkle_root));
 
-                Ok(Response::new(PublishFileResponse {
-                    success: true,
-                    error: "".to_string(),
-                }))
+                if let Err(e) = self.file_publish_tx.send(result).await {
+                    format!("Send file process result to P2P service failed [{e:?}]")
+                } else {
+                    return Ok(Response::new(PublishFileResponse {
+                        success: true,
+                        error: "".to_string(),
+                    }));
+                }
             }
             Err(e) => {
-                let err_msg = e.to_string();
-
-                log::error!(target: LOG_TARGET, "Publish file failed: {err_msg}");
-
-                Ok(Response::new(PublishFileResponse {
-                    success: false,
-                    error: err_msg,
-                }))
+                format!("Process file [{request_str}] failed [{e:?}]")
             }
-        }
+        };
+
+        log::error!(target: LOG_TARGET, "{err_msg}");
+        Err(Status::internal(err_msg))
     }
 }
 
 pub struct GrpcService {
     port: u16,
+    file_publish_tx: mpsc::Sender<FileProcessorResult>,
 }
 
 impl GrpcService {
-    pub fn new(port: u16) -> Self {
-        GrpcService { port }
+    pub fn new(port: u16, file_publish_tx: mpsc::Sender<FileProcessorResult>) -> Self {
+        GrpcService {
+            port,
+            file_publish_tx,
+        }
     }
 
-    async fn start_inner(&self, cancel_token: CancellationToken) -> Result<(), GrpcServiceError> {
+    async fn start_inner(self, cancel_token: CancellationToken) -> Result<(), GrpcServiceError> {
         let grpc_address = format!("127.0.0.1:{}", self.port).as_str().parse()?;
 
         log::info!(target: LOG_TARGET, "gRPC service starting at {grpc_address}");
 
         Server::builder()
-            .add_service(PublishServer::new(PublishService::new()))
+            .add_service(PublishServer::new(PublishService::new(
+                self.file_publish_tx,
+            )))
             .serve_with_shutdown(grpc_address, cancel_token.cancelled())
             .await
             .unwrap_or_else(|e| log::error!(target: LOG_TARGET, "gRPC run into error {e:?}"));
@@ -93,7 +101,7 @@ impl GrpcService {
 
 #[async_trait]
 impl Service for GrpcService {
-    async fn start(&self, cancel_token: CancellationToken) -> Result<(), ServerError> {
+    async fn start(self, cancel_token: CancellationToken) -> Result<(), ServerError> {
         self.start_inner(cancel_token).await?;
 
         Ok(())

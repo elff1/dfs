@@ -11,19 +11,23 @@ use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity, SubscriptionError},
     identify,
     identity::{DecodingError, Keypair},
-    kad::{self, Mode, store::MemoryStore},
+    kad::{self, Mode, Record, store::MemoryStore},
     mdns, multiaddr, noise, ping, relay,
     request_response::{self, cbor},
     swarm::NetworkBehaviour,
     tcp, yamux,
 };
+use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{io, select};
+use tokio::{io, select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
-use super::super::{ServerError, Service};
-use super::config::P2pServiceConfig;
+use super::{
+    super::{super::file_processor::FileProcessorResult, ServerError, Service},
+    config::P2pServiceConfig,
+    models::PublishedFile,
+};
 
 const LOG_TARGET: &str = "app::p2p::service";
 
@@ -74,11 +78,18 @@ pub struct P2pNetworkBehaviour {
 #[derive(Debug)]
 pub struct P2pService {
     config: P2pServiceConfig,
+    file_publish_rx: mpsc::Receiver<FileProcessorResult>,
 }
 
 impl P2pService {
-    pub fn new(config: P2pServiceConfig) -> Self {
-        Self { config }
+    pub fn new(
+        config: P2pServiceConfig,
+        file_publish_rx: mpsc::Receiver<FileProcessorResult>,
+    ) -> Self {
+        Self {
+            config,
+            file_publish_rx,
+        }
     }
 
     async fn keypair(&self) -> Result<Keypair, P2pNetworkError> {
@@ -290,7 +301,45 @@ impl P2pService {
         Ok(())
     }
 
-    async fn start_inner(&self, cancel_token: CancellationToken) -> Result<(), P2pNetworkError> {
+    fn handle_file_publish(
+        &self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        processed_file: FileProcessorResult,
+    ) -> Result<(), P2pNetworkError> {
+        log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks", processed_file.original_file_name, processed_file.number_of_chunks);
+
+        let mut hasher = Sha256Hasher::default();
+        processed_file.hash(&mut hasher);
+        let raw_key = hasher.finish();
+        log::info!(target: LOG_TARGET, "New file[{}] on DHT: {}", processed_file.original_file_name, raw_key);
+
+        match serde_cbor::to_vec(&PublishedFile::new(
+            processed_file.number_of_chunks,
+            processed_file.merkle_root,
+        )) {
+            Ok(bin) => {
+                let record = Record::new(raw_key.to_be_bytes().to_vec(), bin);
+                let key = record.key.clone();
+                if let Err(e) = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .put_record(record, kad::Quorum::Majority)
+                {
+                    log::error!(target: LOG_TARGET, "Failed to put new record to DHT: {e:?}")
+                }
+                if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(key) {
+                    log::error!(target: LOG_TARGET, "Failed to provide new record to DHT: {e:?}")
+                }
+            }
+            Err(e) => {
+                log::error!(target: LOG_TARGET, "Failed to cbor serialize file process result: {e:?}")
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn start_inner(mut self, cancel_token: CancellationToken) -> Result<(), P2pNetworkError> {
         let mut swarm = self.swarm().await?;
         log::info!(target: LOG_TARGET, "Peer ID: {:?}", swarm.local_peer_id());
 
@@ -323,7 +372,7 @@ impl P2pService {
                     libp2p::swarm::SwarmEvent::Behaviour(event) => match event {
                         P2pNetworkBehaviourEvent::Identify(event) => self.handle_identify_event(&mut swarm, event)?,
                         P2pNetworkBehaviourEvent::Mdns(event) => self.handle_mdns_event(&mut swarm, event)?,
-                        P2pNetworkBehaviourEvent::Kademlia(event) => log::debug!(target: LOG_TARGET, "Kademlia event: {event:?}"),
+                        P2pNetworkBehaviourEvent::Kademlia(event) => log::info!(target: LOG_TARGET, "Kademlia event: {event:?}"),
                         P2pNetworkBehaviourEvent::Gossipsub(event) => self.handle_gossipsub_event(&mut swarm, event)?,
                         P2pNetworkBehaviourEvent::RelayServer(event) => log::debug!(target: LOG_TARGET, "RelayServer event: {event:?}"),
                         P2pNetworkBehaviourEvent::RelayClient(event) => log::debug!(target: LOG_TARGET, "RelayClient event: {event:?}"),
@@ -333,6 +382,11 @@ impl P2pService {
                     },
                     _ => log::debug!(target: LOG_TARGET, "Unhandled event: {event:?}"),
                 },
+                file_publish_reuslt = self.file_publish_rx.recv() => {
+                    if let Some(result) = file_publish_reuslt {
+                        self.handle_file_publish(&mut swarm, result)?;
+                    }
+                }
                 _ = cancel_token.cancelled() => {
                     log::info!(target: LOG_TARGET, "P2P service is shutting down...");
                     break;
@@ -346,7 +400,7 @@ impl P2pService {
 
 #[async_trait]
 impl Service for P2pService {
-    async fn start(&self, cancel_token: CancellationToken) -> Result<(), ServerError> {
+    async fn start(self, cancel_token: CancellationToken) -> Result<(), ServerError> {
         log::debug!(target: LOG_TARGET, "P2pService starting...");
 
         self.start_inner(cancel_token).await?;
