@@ -23,10 +23,13 @@ use thiserror::Error;
 use tokio::{io, select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    super::{super::file_processor::FileProcessorResult, ServerError, Service},
-    config::P2pServiceConfig,
-    models::PublishedFile,
+use crate::{
+    app::{
+        ServerError, Service,
+        p2p::{config::P2pServiceConfig, models::PublishedFile},
+    },
+    file_processor::FileProcessResult,
+    file_store,
 };
 
 const LOG_TARGET: &str = "app::p2p::service";
@@ -76,19 +79,22 @@ pub struct P2pNetworkBehaviour {
 }
 
 #[derive(Debug)]
-pub struct P2pService {
+pub struct P2pService<F: file_store::Store + Send + Sync + 'static> {
     config: P2pServiceConfig,
-    file_publish_rx: mpsc::Receiver<FileProcessorResult>,
+    file_publish_rx: mpsc::Receiver<FileProcessResult>,
+    file_store: F,
 }
 
-impl P2pService {
+impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
     pub fn new(
         config: P2pServiceConfig,
-        file_publish_rx: mpsc::Receiver<FileProcessorResult>,
+        file_publish_rx: mpsc::Receiver<FileProcessResult>,
+        file_store: F,
     ) -> Self {
         Self {
             config,
             file_publish_rx,
+            file_store,
         }
     }
 
@@ -304,21 +310,21 @@ impl P2pService {
     fn handle_file_publish(
         &self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        processed_file: FileProcessorResult,
+        processed_file: FileProcessResult,
     ) -> Result<(), P2pNetworkError> {
         log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks", processed_file.original_file_name, processed_file.number_of_chunks);
 
         let mut hasher = Sha256Hasher::default();
         processed_file.hash(&mut hasher);
-        let raw_key = hasher.finish();
-        log::info!(target: LOG_TARGET, "New file[{}] on DHT: {}", processed_file.original_file_name, raw_key);
+        let raw_key = hasher.finish().to_be_bytes().to_vec();
+        log::info!(target: LOG_TARGET, "New file[{}] on DHT: {}", processed_file.original_file_name, hex::encode(&raw_key));
 
         match serde_cbor::to_vec(&PublishedFile::new(
             processed_file.number_of_chunks,
             processed_file.merkle_root,
         )) {
             Ok(bin) => {
-                let record = Record::new(raw_key.to_be_bytes().to_vec(), bin);
+                let record = Record::new(raw_key, bin);
                 let key = record.key.clone();
                 if let Err(e) = swarm
                     .behaviour_mut()
@@ -329,6 +335,10 @@ impl P2pService {
                 }
                 if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(key) {
                     log::error!(target: LOG_TARGET, "Failed to provide new record to DHT: {e:?}")
+                }
+
+                if let Err(e) = self.file_store.add_published_file(processed_file.into()) {
+                    log::error!(target: LOG_TARGET, "Failed to add new published file to file store: {e:?}")
                 }
             }
             Err(e) => {
@@ -399,7 +409,7 @@ impl P2pService {
 }
 
 #[async_trait]
-impl Service for P2pService {
+impl<F: file_store::Store + Send + Sync + 'static> Service for P2pService<F> {
     async fn start(self, cancel_token: CancellationToken) -> Result<(), ServerError> {
         log::debug!(target: LOG_TARGET, "P2pService starting...");
 

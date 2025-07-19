@@ -19,16 +19,16 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 pub const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FileProcessorResult {
+pub struct FileProcessResult {
     pub original_file_name: String,
     pub number_of_chunks: u64,
-    pub chunks_dirctory: PathBuf,
+    pub chunks_directory: PathBuf,
     pub merkle_root: [u8; 32],
     pub merkle_leaves: Vec<[u8; 32]>,
     pub public: bool,
 }
 
-impl FileProcessorResult {
+impl FileProcessResult {
     pub fn new(
         original_file_name: String,
         number_of_chunks: u64,
@@ -40,7 +40,7 @@ impl FileProcessorResult {
         Self {
             original_file_name,
             number_of_chunks,
-            chunks_dirctory,
+            chunks_directory: chunks_dirctory,
             merkle_root,
             merkle_leaves,
             public,
@@ -48,7 +48,7 @@ impl FileProcessorResult {
     }
 }
 
-impl Hash for FileProcessorResult {
+impl Hash for FileProcessResult {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.original_file_name.hash(state);
         self.number_of_chunks.hash(state);
@@ -63,7 +63,7 @@ pub struct FileProcessor();
 impl FileProcessor {
     pub async fn publish_file(
         request: publish::PublishFileRequest,
-    ) -> io::Result<FileProcessorResult> {
+    ) -> io::Result<FileProcessResult> {
         let file = PathBuf::from(request.file_path);
         let public = request.public;
 
@@ -77,7 +77,7 @@ impl FileProcessor {
     }
 }
 
-async fn publish_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessorResult> {
+async fn publish_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()
@@ -134,7 +134,7 @@ async fn publish_one_file(file_path: &Path, public: bool) -> io::Result<FileProc
         .root()
         .ok_or(io::Error::other("can not get Merkle root"))?;
 
-    let result = FileProcessorResult::new(
+    let result = FileProcessResult::new(
         file_name,
         chunk_index,
         chunk_dir,
@@ -143,7 +143,7 @@ async fn publish_one_file(file_path: &Path, public: bool) -> io::Result<FileProc
         public,
     );
 
-    let cbor_file = fs::File::create(result.chunks_dirctory.join(PROCESSING_RESULT_FILE_NAME))
+    let cbor_file = fs::File::create(result.chunks_directory.join(PROCESSING_RESULT_FILE_NAME))
         .await?
         .into_std()
         .await;

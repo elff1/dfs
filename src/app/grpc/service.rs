@@ -6,13 +6,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, transport::Server};
 
-use super::publish::{
-    PublishFileRequest, PublishFileResponse,
-    publish_server::{Publish, PublishServer},
-};
 use crate::{
-    app::{ServerError, Service},
-    file_processor::{FileProcessor, FileProcessorResult},
+    app::{
+        ServerError, Service,
+        grpc::publish::{
+            PublishFileRequest, PublishFileResponse,
+            publish_server::{Publish, PublishServer},
+        },
+    },
+    file_processor::{FileProcessResult, FileProcessor},
 };
 
 const LOG_TARGET: &str = "app::grpc::service";
@@ -25,11 +27,11 @@ pub enum GrpcServiceError {
 
 #[derive(Debug)]
 struct PublishService {
-    file_publish_tx: mpsc::Sender<FileProcessorResult>,
+    file_publish_tx: mpsc::Sender<FileProcessResult>,
 }
 
 impl PublishService {
-    pub fn new(file_publish_tx: mpsc::Sender<FileProcessorResult>) -> Self {
+    pub fn new(file_publish_tx: mpsc::Sender<FileProcessResult>) -> Self {
         PublishService { file_publish_tx }
     }
 }
@@ -69,11 +71,11 @@ impl Publish for PublishService {
 
 pub struct GrpcService {
     port: u16,
-    file_publish_tx: mpsc::Sender<FileProcessorResult>,
+    file_publish_tx: mpsc::Sender<FileProcessResult>,
 }
 
 impl GrpcService {
-    pub fn new(port: u16, file_publish_tx: mpsc::Sender<FileProcessorResult>) -> Self {
+    pub fn new(port: u16, file_publish_tx: mpsc::Sender<FileProcessResult>) -> Self {
         GrpcService {
             port,
             file_publish_tx,

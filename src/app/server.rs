@@ -8,13 +8,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    super::file_processor::FileProcessorResult,
-    grpc::service::{GrpcService, GrpcServiceError},
-    p2p::{
+use crate::{
+    app::grpc::service::{GrpcService, GrpcServiceError},
+    app::p2p::{
         config::P2pServiceConfig,
         service::{P2pNetworkError, P2pService},
     },
+    file_processor::FileProcessResult,
+    file_store::rocksdb::{RocksDb, RocksDbStoreError},
 };
 
 const LOG_TARGET: &str = "app::server";
@@ -43,6 +44,9 @@ pub enum ServerError {
 
     #[error("gRPC service error: {0}")]
     GrpcService(#[from] GrpcServiceError),
+
+    #[error("RocksDB store error: {0}")]
+    RocksDbStore(#[from] RocksDbStoreError),
 }
 
 pub type ServerResult<T> = std::result::Result<T, ServerError>;
@@ -69,7 +73,9 @@ impl Server {
     }
 
     pub async fn start(&self) -> ServerResult<()> {
-        let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessorResult>(100);
+        let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessResult>(100);
+
+        let file_store = RocksDb::new("./file_store")?;
 
         // P2P service
         let p2p_service = P2pService::new(
@@ -77,6 +83,7 @@ impl Server {
                 .with_keypair_file("./keys.keypair")
                 .build(),
             file_publish_rx,
+            file_store,
         );
         self.spawn_task(p2p_service).await?;
 
