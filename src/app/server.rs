@@ -75,15 +75,13 @@ impl Server {
     pub async fn start(&self) -> ServerResult<()> {
         let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessResult>(100);
 
-        let file_store = RocksDb::new("./file_store")?;
-
         // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
-                .with_keypair_file("./keys.keypair")
+                .with_keypair_file("./keys.keypair".into())
                 .build(),
             file_publish_rx,
-            file_store,
+            RocksDb::new("./file_store")?,
         );
         self.spawn_task(p2p_service).await?;
 

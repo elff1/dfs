@@ -45,27 +45,35 @@ impl Publish for PublishService {
         let request_str = format!("{request:?}");
         log::info!(target: LOG_TARGET, "Got publish request: {request_str}");
 
-        let err_msg = match FileProcessor::publish_file(request.into_inner()).await {
-            Ok(result) => {
-                log::info!(target: LOG_TARGET, "File process result: file[{}], hash[{}]",
-                    result.original_file_name, hex::encode(result.merkle_root));
+        let PublishFileRequest { file_path, public } = request.into_inner();
+        let file_result = FileProcessor::process_file(file_path, public)
+            .await
+            .map_err(|e| {
+                let err_str = format!("Process file [{request_str}] failed: {e:?}");
+                log::error!(target: LOG_TARGET, "{err_str}");
 
-                if let Err(e) = self.file_publish_tx.send(result).await {
-                    format!("Send file process result to P2P service failed [{e:?}]")
-                } else {
-                    return Ok(Response::new(PublishFileResponse {
-                        success: true,
-                        error: "".to_string(),
-                    }));
+                use std::io::ErrorKind as K;
+                match e.kind() {
+                    K::NotFound => Status::not_found(request_str),
+                    K::PermissionDenied => Status::permission_denied(request_str),
+                    K::InvalidFilename => Status::invalid_argument(request_str),
+                    _ => Status::internal(err_str),
                 }
-            }
-            Err(e) => {
-                format!("Process file [{request_str}] failed [{e:?}]")
-            }
-        };
+            })?;
 
-        log::error!(target: LOG_TARGET, "{err_msg}");
-        Err(Status::internal(err_msg))
+        log::info!(target: LOG_TARGET, "File process result: file[{}], hash[{}]",
+            file_result.original_file_name, hex::encode(file_result.merkle_root));
+
+        self.file_publish_tx.send(file_result).await.map_err(|e| {
+            let err_str = format!("Send file process result to P2P service failed: {e:?}");
+            log::error!(target: LOG_TARGET, "{err_str}");
+            Status::internal(err_str)
+        })?;
+
+        Ok(Response::new(PublishFileResponse {
+            success: true,
+            error: "".to_string(),
+        }))
     }
 }
 

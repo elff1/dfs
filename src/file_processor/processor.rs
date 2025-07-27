@@ -1,22 +1,20 @@
 use std::{
-    hash::Hash,
+    hash::{Hash, Hasher as _},
     mem::MaybeUninit,
     path::{Path, PathBuf},
 };
 
 use rs_merkle::{Hasher, MerkleTree, algorithms::Sha256};
+use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
     io::{self, AsyncReadExt, AsyncWriteExt},
 };
 
-use crate::app::grpc::publish;
-
 const LOG_TARGET: &str = "file_processor::processor";
 const CHUNK_SIZE: usize = 1024 * 1024;
-
-pub const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
+const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessResult {
@@ -26,6 +24,46 @@ pub struct FileProcessResult {
     pub merkle_root: [u8; 32],
     pub merkle_leaves: Vec<[u8; 32]>,
     pub public: bool,
+}
+
+impl TryFrom<Vec<u8>> for FileProcessResult {
+    type Error = serde_cbor::Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(&value)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub struct FileProcessResultHash(u64);
+
+impl FileProcessResultHash {
+    pub fn new(hash: u64) -> Self {
+        Self(hash)
+    }
+
+    pub fn inner(&self) -> u64 {
+        self.0
+    }
+
+    pub fn to_vec(self) -> Vec<u8> {
+        self.into()
+    }
+}
+
+impl TryFrom<&[u8]> for FileProcessResultHash {
+    type Error = ();
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let value: [u8; 8] = value.try_into().map_err(|_| {})?;
+        Ok(Self(u64::from_be_bytes(value)))
+    }
+}
+
+impl From<FileProcessResultHash> for Vec<u8> {
+    fn from(value: FileProcessResultHash) -> Self {
+        value.0.to_be_bytes().to_vec()
+    }
 }
 
 impl FileProcessResult {
@@ -46,6 +84,12 @@ impl FileProcessResult {
             public,
         }
     }
+
+    pub fn hash_sha256(&self) -> FileProcessResultHash {
+        let mut hasher = Sha256Hasher::default();
+        self.hash(&mut hasher);
+        FileProcessResultHash(hasher.finish())
+    }
 }
 
 impl Hash for FileProcessResult {
@@ -61,23 +105,24 @@ pub struct FileProcessor();
 
 //#[tonic::async_trait]
 impl FileProcessor {
-    pub async fn publish_file(
-        request: publish::PublishFileRequest,
-    ) -> io::Result<FileProcessResult> {
-        let file = PathBuf::from(request.file_path);
-        let public = request.public;
+    pub async fn process_file(file_path: String, public: bool) -> io::Result<FileProcessResult> {
+        let file = PathBuf::from(file_path);
 
         log::debug!(target: LOG_TARGET, "Start publish: {}", file.display());
 
         if fs::metadata(&file).await?.is_dir() {
             todo!();
         } else {
-            publish_one_file(&file, public).await
+            process_one_file(&file, public).await
         }
+    }
+
+    pub async fn get_file_metadata<P: AsRef<Path>>(chunks_directory: P) -> io::Result<Vec<u8>> {
+        fs::read(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME)).await
     }
 }
 
-async fn publish_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
+async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()

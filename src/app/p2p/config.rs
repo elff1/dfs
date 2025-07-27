@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +25,8 @@ impl P2pServiceConfigBuilder {
         }
     }
 
-    pub fn with_keypair_file<P: AsRef<Path>>(mut self, keypair_file: P) -> Self {
-        self.config.keypair_file = keypair_file.as_ref().into();
+    pub fn with_keypair_file(mut self, keypair_file: PathBuf) -> Self {
+        self.config.keypair_file = keypair_file;
         self
     }
 
