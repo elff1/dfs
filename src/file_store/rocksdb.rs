@@ -1,16 +1,12 @@
 use std::path::Path;
 
-use rocksdb::{ColumnFamilyDescriptor, Options};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options};
 use thiserror::Error;
 
 use crate::file_store::{FileProcessResultHash, FileStoreError, PublishedFileRecord, Store};
 
-const LOG_TARGET: &str = "file_store::rocksdb";
+// const LOG_TARGET: &str = "file_store::rocksdb";
 const PUBLISHED_FILES_COLUMN_FAMILY_NAME: &str = "published_files";
-
-pub struct RocksDb {
-    db: rocksdb::DB,
-}
 
 #[derive(Debug, Error)]
 pub enum RocksDbStoreError {
@@ -20,8 +16,12 @@ pub enum RocksDbStoreError {
     ColumnFamilyMissing(String),
     #[error("Cbor error: {0}")]
     Cbor(#[from] serde_cbor::Error),
-    // #[error("Invalid file ID: {}", hex::encode(.0))]
+    // #[error("Invalid file ID: {}", hex::encode(.0.as_ref()))]
     // InvalidFileId(Vec<u8>),
+}
+
+pub struct RocksDb {
+    db: rocksdb::DB,
 }
 
 impl RocksDb {
@@ -35,16 +35,17 @@ impl RocksDb {
         })
     }
 
+    fn column_family(&self, cf_name: &str) -> Result<&ColumnFamily, RocksDbStoreError> {
+        self.db
+            .cf_handle(cf_name)
+            .ok_or(RocksDbStoreError::ColumnFamilyMissing(cf_name.to_string()))
+    }
+
     fn add_published_file_inner(
         &self,
         record: PublishedFileRecord,
     ) -> Result<(), RocksDbStoreError> {
-        let cf = self
-            .db
-            .cf_handle(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
-            .ok_or(RocksDbStoreError::ColumnFamilyMissing(
-                PUBLISHED_FILES_COLUMN_FAMILY_NAME.to_string(),
-            ))?;
+        let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         let key = record.key();
         let value: Vec<u8> = record.try_into()?;
         self.db.put_cf(cf, key, value)?;
@@ -53,35 +54,17 @@ impl RocksDb {
     }
 
     fn published_file_exists_inner(&self, file_id: u64) -> Result<bool, RocksDbStoreError> {
-        let cf = self
-            .db
-            .cf_handle(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
-            .ok_or(RocksDbStoreError::ColumnFamilyMissing(
-                PUBLISHED_FILES_COLUMN_FAMILY_NAME.to_string(),
-            ))?;
+        let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self
             .db
-            .full_iterator_cf(cf, rocksdb::IteratorMode::Start)
-            .filter_map(|res| res.ok())
-            .filter_map(|(key, _)| {
-                FileProcessResultHash::try_from(key.as_ref())
-                    .inspect_err(|_| log::debug!(target: LOG_TARGET, "Invalid file ID in RocksDB: {}", hex::encode(key)))
-                    .ok()
-            })
-            .any(|key| key.inner() == file_id)
-        )
+            .key_may_exist_cf(cf, FileProcessResultHash::new(file_id).to_vec()))
     }
 
     fn get_published_file_inner(
         &self,
         file_id: u64,
     ) -> Result<Option<PublishedFileRecord>, RocksDbStoreError> {
-        let cf = self
-            .db
-            .cf_handle(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
-            .ok_or(RocksDbStoreError::ColumnFamilyMissing(
-                PUBLISHED_FILES_COLUMN_FAMILY_NAME.to_string(),
-            ))?;
+        let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self
             .db
             .get_cf(cf, FileProcessResultHash::new(file_id).to_vec())?

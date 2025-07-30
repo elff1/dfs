@@ -3,12 +3,18 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    file_processor::{FileProcessResult, FileProcessResultHash},
-    file_store::rocksdb::RocksDbStoreError,
-};
+use self::rocksdb::RocksDbStoreError;
+use crate::file_processor::{FileProcessResult, FileProcessResultHash};
 
 pub mod rocksdb;
+
+#[derive(Debug, Error)]
+pub enum FileStoreError {
+    #[error("RocksDB store error: {0}")]
+    RocksDbStore(#[from] RocksDbStoreError),
+    #[error("Published file ID[{0}] not found")]
+    PublishedFileNotFound(u64),
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublishedFileRecord {
@@ -16,17 +22,6 @@ pub struct PublishedFileRecord {
     pub original_file_name: String,
     pub chunks_directory: PathBuf,
     pub public: bool,
-}
-
-impl From<FileProcessResult> for PublishedFileRecord {
-    fn from(result: FileProcessResult) -> Self {
-        Self {
-            id: result.hash_sha256(),
-            original_file_name: result.original_file_name,
-            chunks_directory: result.chunks_directory,
-            public: result.public,
-        }
-    }
 }
 
 impl PublishedFileRecord {
@@ -43,11 +38,33 @@ impl PublishedFileRecord {
     }
 }
 
-impl TryInto<Vec<u8>> for PublishedFileRecord {
+impl From<FileProcessResult> for PublishedFileRecord {
+    fn from(result: FileProcessResult) -> Self {
+        Self {
+            id: result.hash_sha256(),
+            original_file_name: result.original_file_name,
+            chunks_directory: result.chunks_directory,
+            public: result.public,
+        }
+    }
+}
+
+impl From<&FileProcessResult> for PublishedFileRecord {
+    fn from(result: &FileProcessResult) -> Self {
+        Self {
+            id: result.hash_sha256(),
+            original_file_name: result.original_file_name.clone(),
+            chunks_directory: result.chunks_directory.clone(),
+            public: result.public,
+        }
+    }
+}
+
+impl TryFrom<PublishedFileRecord> for Vec<u8> {
     type Error = serde_cbor::Error;
 
-    fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-        serde_cbor::to_vec(&self)
+    fn try_from(value: PublishedFileRecord) -> Result<Self, Self::Error> {
+        serde_cbor::to_vec(&value)
     }
 }
 
@@ -59,14 +76,8 @@ impl TryFrom<Vec<u8>> for PublishedFileRecord {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum FileStoreError {
-    #[error("RocksDB store error: {0}")]
-    RocksDbStore(#[from] RocksDbStoreError),
-    #[error("Published file ID[{0}] not found")]
-    PublishedFileNotFound(u64),
-}
-
+// TODO:
+#[allow(dead_code)]
 pub trait Store {
     fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError>;
     fn published_file_exists(&self, file_id: u64) -> Result<bool, FileStoreError>;

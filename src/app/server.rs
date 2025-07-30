@@ -8,12 +8,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    app::grpc::service::{GrpcService, GrpcServiceError},
-    app::p2p::{
+use super::{
+    grpc::{GrpcService, GrpcServiceError},
+    p2p::{
         config::P2pServiceConfig,
-        service::{P2pNetworkError, P2pService},
+        {P2pCommand, P2pNetworkError, P2pService},
     },
+};
+use crate::{
     file_processor::FileProcessResult,
     file_store::rocksdb::{RocksDb, RocksDbStoreError},
 };
@@ -74,19 +76,21 @@ impl Server {
 
     pub async fn start(&self) -> ServerResult<()> {
         let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessResult>(100);
+        let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(100);
 
         // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file("./keys.keypair".into())
                 .build(),
-            file_publish_rx,
             RocksDb::new("./file_store")?,
+            file_publish_rx,
+            p2p_command_rx,
         );
         self.spawn_task(p2p_service).await?;
 
         // gRPC service
-        let grpc_service = GrpcService::new(GRPC_PORT, file_publish_tx);
+        let grpc_service = GrpcService::new(GRPC_PORT, file_publish_tx, p2p_command_tx);
         self.spawn_task(grpc_service).await?;
 
         Ok(())

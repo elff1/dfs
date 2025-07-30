@@ -26,6 +26,41 @@ pub struct FileProcessResult {
     pub public: bool,
 }
 
+impl FileProcessResult {
+    pub fn new(
+        original_file_name: String,
+        number_of_chunks: u64,
+        chunks_directory: PathBuf,
+        merkle_root: [u8; 32],
+        merkle_leaves: Vec<[u8; 32]>,
+        public: bool,
+    ) -> Self {
+        Self {
+            original_file_name,
+            number_of_chunks,
+            chunks_directory,
+            merkle_root,
+            merkle_leaves,
+            public,
+        }
+    }
+
+    pub fn hash_sha256(&self) -> FileProcessResultHash {
+        let mut hasher = Sha256Hasher::default();
+        self.hash(&mut hasher);
+        FileProcessResultHash(hasher.finish())
+    }
+}
+
+impl Hash for FileProcessResult {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.original_file_name.hash(state);
+        self.number_of_chunks.hash(state);
+        self.merkle_root.hash(state);
+        self.public.hash(state);
+    }
+}
+
 impl TryFrom<Vec<u8>> for FileProcessResult {
     type Error = serde_cbor::Error;
 
@@ -46,6 +81,10 @@ impl FileProcessResultHash {
         self.0
     }
 
+    pub fn to_array(self) -> [u8; 8] {
+        self.0.to_be_bytes()
+    }
+
     pub fn to_vec(self) -> Vec<u8> {
         self.into()
     }
@@ -62,42 +101,7 @@ impl TryFrom<&[u8]> for FileProcessResultHash {
 
 impl From<FileProcessResultHash> for Vec<u8> {
     fn from(value: FileProcessResultHash) -> Self {
-        value.0.to_be_bytes().to_vec()
-    }
-}
-
-impl FileProcessResult {
-    pub fn new(
-        original_file_name: String,
-        number_of_chunks: u64,
-        chunks_dirctory: PathBuf,
-        merkle_root: [u8; 32],
-        merkle_leaves: Vec<[u8; 32]>,
-        public: bool,
-    ) -> Self {
-        Self {
-            original_file_name,
-            number_of_chunks,
-            chunks_directory: chunks_dirctory,
-            merkle_root,
-            merkle_leaves,
-            public,
-        }
-    }
-
-    pub fn hash_sha256(&self) -> FileProcessResultHash {
-        let mut hasher = Sha256Hasher::default();
-        self.hash(&mut hasher);
-        FileProcessResultHash(hasher.finish())
-    }
-}
-
-impl Hash for FileProcessResult {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.original_file_name.hash(state);
-        self.number_of_chunks.hash(state);
-        self.merkle_root.hash(state);
-        self.public.hash(state);
+        value.to_array().to_vec()
     }
 }
 
