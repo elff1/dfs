@@ -1,3 +1,5 @@
 /target
-/file_store
+
 keys.keypair
+file_store/
+!/src/file_store/

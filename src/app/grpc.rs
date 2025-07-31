@@ -54,7 +54,7 @@ impl GrpcService {
             )))
             .serve_with_shutdown(grpc_address, cancel_token.cancelled())
             .await
-            .unwrap_or_else(|e| log::error!(target: LOG_TARGET, "gRPC run into error {e:?}"));
+            .unwrap_or_else(|e| log::error!(target: LOG_TARGET, "gRPC run into error: {e:?}"));
 
         log::info!(target: LOG_TARGET, "gRPC service is stutting down...");
 

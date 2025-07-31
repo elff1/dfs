@@ -77,16 +77,12 @@ impl FileProcessResultHash {
         Self(hash)
     }
 
-    pub fn inner(&self) -> u64 {
+    pub fn raw(&self) -> u64 {
         self.0
     }
 
     pub fn to_array(self) -> [u8; 8] {
         self.0.to_be_bytes()
-    }
-
-    pub fn to_vec(self) -> Vec<u8> {
-        self.into()
     }
 }
 

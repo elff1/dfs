@@ -54,7 +54,7 @@ impl Dfs for DfsGrpcService {
                 }
             })?;
 
-        log::info!(target: LOG_TARGET, "File process result: file[{}], hash[{}]",
+        log::info!(target: LOG_TARGET, "File process result: file[{}], root hash[{}]",
             file_result.original_file_name, hex::encode(file_result.merkle_root.as_ref()));
 
         self.file_publish_tx.send(file_result).await.map_err(|e| {

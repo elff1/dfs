@@ -30,7 +30,7 @@ use self::{config::P2pServiceConfig, models::PublishedFile};
 use super::{ServerError, Service};
 use crate::{
     file_processor::{FileProcessResult, FileProcessResultHash, FileProcessor},
-    file_store,
+    file_store::{self, PublishedFileRecord},
 };
 
 pub mod config;
@@ -105,7 +105,7 @@ pub enum P2pCommand {
 struct MeatadataDownloadRequestData {
     pub root_request: MetadataDownloadRequest,
     pub tx: Option<oneshot::Sender<Option<FileProcessResult>>>,
-    pub kad_get_providers_query_id: QueryId,
+    pub kad_get_providers_query_id: Option<QueryId>,
     pub p2p_metadata_download_request_id: Option<OutboundRequestId>,
 }
 
@@ -314,7 +314,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 let request_data = self
                     .metadata_download_requests
                     .iter_mut()
-                    .find(|d| d.kad_get_providers_query_id == query_id)?;
+                    .find(|d| d.kad_get_providers_query_id == Some(query_id))?;
 
                 let get_providers_result = match result {
                     QueryResult::GetProviders(result) => Some(result),
@@ -325,7 +325,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 })
                 .ok()?;
 
-                let remote_peer_id = match get_providers_result {
+                let neighbor_peer_id = match get_providers_result {
                     kad::GetProvidersOk::FoundProviders { key: _, providers } => {
                         providers.into_iter().next()
                     }
@@ -334,10 +334,13 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     }
                 }?;
 
+                // avoid downloading metadata more than once
+                request_data.kad_get_providers_query_id = None;
+
                 let request_id = swarm
                     .behaviour_mut()
                     .metadata_download
-                    .send_request(&remote_peer_id, request_data.root_request.clone());
+                    .send_request(&neighbor_peer_id, request_data.root_request.clone());
                 request_data.p2p_metadata_download_request_id = Some(request_id);
             }
             _ => {
@@ -382,7 +385,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         request,
                         channel: _,
                     } => {
-                        log::info!(target: LOG_TARGET, "File download request {request:?} from {peer}");
+                        log::info!(target: LOG_TARGET, "File download request [{request:?}] from {peer}");
                         // let response = FileDownloadResponse { data: vec![] }; // Placeholder for actual data
                         // swarm
                         //     .behaviour_mut()
@@ -393,7 +396,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         request_id: _,
                         response,
                     } => {
-                        log::info!(target: LOG_TARGET, "File download response {response:?} from {peer}");
+                        log::info!(target: LOG_TARGET, "File download response [{response:?}] from {peer}");
                     }
                 }
             }
@@ -452,7 +455,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     request,
                     channel,
                 } => {
-                    log::info!(target: LOG_TARGET, "Metadata download request {request:?} from {peer}");
+                    log::info!(target: LOG_TARGET, "Metadata download request [{request:?}] from {peer}");
                     match self.get_published_file_metadata(request.file_id).await {
                         Ok(metadata) => {
                             swarm.behaviour_mut().metadata_download
@@ -474,7 +477,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     request_id,
                     response,
                 } => {
-                    log::info!(target: LOG_TARGET, "Metadata download response {response:?} from {peer}");
+                    log::info!(target: LOG_TARGET, "Metadata download response from {peer}");
                     let metadata = self.parse_metadata_download_response(response);
 
                     if let Some(ref metadata) = metadata {
@@ -504,11 +507,13 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         processed_file: FileProcessResult,
     ) -> Option<()> {
-        let record_key: Vec<_> = processed_file.hash_sha256().into();
-        log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks on DHT: {}",
-            processed_file.original_file_name, processed_file.number_of_chunks, hex::encode(&record_key));
+        let file_store_record: PublishedFileRecord = (&processed_file).into();
 
-        let record_value = serde_cbor::to_vec(&PublishedFile::new(
+        let kad_key: Vec<_> = file_store_record.key();
+        log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks on DHT: {}/{}",
+            processed_file.original_file_name, processed_file.number_of_chunks, file_store_record.id.raw() ,hex::encode(&kad_key));
+
+        let kad_value = serde_cbor::to_vec(&PublishedFile::new(
             processed_file.number_of_chunks,
             processed_file.merkle_root,
         ))
@@ -517,12 +522,12 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         })
         .ok()?;
 
-        let record = Record::new(record_key, record_value);
-        let key = record.key.clone();
+        let kad_record = Record::new(kad_key, kad_value);
+        let key = kad_record.key.clone();
         swarm
             .behaviour_mut()
             .kademlia
-            .put_record(record, kad::Quorum::Majority)
+            .put_record(kad_record, kad::Quorum::Majority)
             .map_err(|e| log::error!(target: LOG_TARGET, "Put new record to DHT failed: {e:?}"))
             .ok();
         swarm
@@ -532,7 +537,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             .map_err(|e| log::error!(target: LOG_TARGET, "Provide new record to DHT failed: {e:?}"))
             .ok();
 
-        self.file_store.add_published_file(processed_file.into()).unwrap_or_else(|e| {
+        self.file_store.add_published_file(file_store_record).unwrap_or_else(|e| {
             log::error!(target: LOG_TARGET, "Add new published file to file store failed: {e:?}")
         });
 
@@ -548,7 +553,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     .push(MeatadataDownloadRequestData {
                         root_request: request,
                         tx: Some(tx),
-                        kad_get_providers_query_id: query_id,
+                        kad_get_providers_query_id: Some(query_id),
                         p2p_metadata_download_request_id: None,
                     });
             }

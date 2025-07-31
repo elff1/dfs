@@ -57,7 +57,7 @@ impl RocksDb {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self
             .db
-            .key_may_exist_cf(cf, FileProcessResultHash::new(file_id).to_vec()))
+            .key_may_exist_cf(cf, FileProcessResultHash::new(file_id).to_array()))
     }
 
     fn get_published_file_inner(
@@ -67,7 +67,7 @@ impl RocksDb {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self
             .db
-            .get_cf(cf, FileProcessResultHash::new(file_id).to_vec())?
+            .get_cf(cf, FileProcessResultHash::new(file_id).to_array())?
             .map(PublishedFileRecord::try_from)
             .transpose()?)
     }

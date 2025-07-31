@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
+    fs,
     sync::{Mutex, mpsc},
     task::{JoinError, JoinHandle},
 };
@@ -16,12 +17,12 @@ use super::{
     },
 };
 use crate::{
+    cli::Cli,
     file_processor::FileProcessResult,
     file_store::rocksdb::{RocksDb, RocksDbStoreError},
 };
 
 const LOG_TARGET: &str = "app::server";
-const GRPC_PORT: u16 = 29999;
 
 #[derive(Debug, Error)]
 #[allow(dead_code)] // Remove this line if you plan to use all variants
@@ -37,6 +38,9 @@ pub enum ServerError {
 
     #[error("Failed to send response: {0}")]
     Response(String),
+
+    #[error("I/O error: {0}")]
+    IO(#[from] io::Error),
 
     #[error("Task join error: {0}")]
     TaskJoin(#[from] JoinError),
@@ -56,6 +60,7 @@ pub type ServerResult<T> = std::result::Result<T, ServerError>;
 type SubtaskHandle = JoinHandle<Result<(), ServerError>>;
 
 pub struct Server {
+    cli: Cli,
     cancel_token: CancellationToken,
     subtasks: Arc<Mutex<Vec<SubtaskHandle>>>,
 }
@@ -67,30 +72,48 @@ pub trait Service: Send + Sync + 'static {
 }
 
 impl Server {
-    pub fn new() -> Self {
+    pub fn new(cli: Cli) -> Self {
         Self {
+            cli,
             cancel_token: CancellationToken::new(),
             subtasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
+    async fn init_base_path(&self) -> ServerResult<()> {
+        let path = &self.cli.base_path;
+
+        if !fs::try_exists(path).await? {
+            fs::create_dir_all(path).await?;
+        } else if !fs::metadata(path).await?.is_dir() {
+            return Err(ServerError::Start(format!(
+                "Path [{}] is not a directory",
+                path.display()
+            )));
+        }
+
+        Ok(())
+    }
+
     pub async fn start(&self) -> ServerResult<()> {
+        self.init_base_path().await?;
+
         let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessResult>(100);
         let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(100);
 
         // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
-                .with_keypair_file("./keys.keypair".into())
+                .with_keypair_file(self.cli.base_path.join("keys.keypair"))
                 .build(),
-            RocksDb::new("./file_store")?,
+            RocksDb::new(self.cli.base_path.join("file_store"))?,
             file_publish_rx,
             p2p_command_rx,
         );
         self.spawn_task(p2p_service).await?;
 
         // gRPC service
-        let grpc_service = GrpcService::new(GRPC_PORT, file_publish_tx, p2p_command_tx);
+        let grpc_service = GrpcService::new(self.cli.grpc_port, file_publish_tx, p2p_command_tx);
         self.spawn_task(grpc_service).await?;
 
         Ok(())
