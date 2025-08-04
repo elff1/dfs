@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use libp2p::{
     StreamProtocol, Swarm, TransportError, dcutr,
-    futures::StreamExt,
+    futures::stream::StreamExt,
     gossipsub::{self, IdentTopic, MessageAuthenticity, SubscriptionError},
     identify,
     identity::{DecodingError, Keypair},
@@ -506,9 +506,9 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         &self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         processed_file: FileProcessResult,
+        file_store_record: PublishedFileRecord,
+        need_store: bool,
     ) -> Option<()> {
-        let file_store_record: PublishedFileRecord = (&processed_file).into();
-
         let kad_key: Vec<_> = file_store_record.key();
         log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks on DHT: {}/{}",
             processed_file.original_file_name, processed_file.number_of_chunks, file_store_record.id.raw() ,hex::encode(&kad_key));
@@ -537,9 +537,11 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             .map_err(|e| log::error!(target: LOG_TARGET, "Provide new record to DHT failed: {e:?}"))
             .ok();
 
-        self.file_store.add_published_file(file_store_record).unwrap_or_else(|e| {
-            log::error!(target: LOG_TARGET, "Add new published file to file store failed: {e:?}")
-        });
+        if need_store {
+            self.file_store.add_published_file(file_store_record).unwrap_or_else(|e| {
+                log::error!(target: LOG_TARGET, "Add new published file to file store failed: {e:?}")
+            });
+        }
 
         Some(())
     }
@@ -560,9 +562,42 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         }
     }
 
+    async fn publish_one_stored_file(
+        &self,
+        swarm: &mut Swarm<P2pNetworkBehaviour>,
+        file_store_record: PublishedFileRecord,
+    ) -> Option<()> {
+        let metadata = FileProcessor::get_file_metadata(&file_store_record.chunks_directory)
+            .await
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Read metadata file[{}] of file ID[{}] failed: {e}",
+                    file_store_record.chunks_directory.display(), file_store_record.id.raw());
+            })
+            .and_then(|metadata| {
+                metadata.try_into().map_err(|e| {
+                    log::error!(target: LOG_TARGET, "Parse metadata of file ID[{}] failed: {e}", file_store_record.id.raw());
+                })
+            })
+            .ok()?;
+
+        self.handle_file_publish(swarm, metadata, file_store_record, false)
+    }
+
+    async fn publish_stored_files(&self, swarm: &mut Swarm<P2pNetworkBehaviour>) -> Option<()> {
+        let records = self.file_store.get_all_published_files().map_err(|e| {
+            log::error!(target: LOG_TARGET, "Get all published files from file store failed: {e:?}");
+        }).ok()?;
+
+        for file_store_record in records {
+            self.publish_one_stored_file(swarm, file_store_record).await;
+        }
+
+        Some(())
+    }
+
     async fn start_inner(mut self, cancel_token: CancellationToken) -> Result<(), P2pNetworkError> {
         let mut swarm = self.swarm().await?;
-        log::info!(target: LOG_TARGET, "Peer ID: {:?}", swarm.local_peer_id());
+        log::info!(target: LOG_TARGET, "Peer ID: {}", swarm.local_peer_id());
 
         swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
         swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
@@ -573,6 +608,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             .behaviour_mut()
             .gossipsub
             .subscribe(&file_owners_topic)?;
+
+        self.publish_stored_files(&mut swarm).await;
 
         loop {
             select! {
@@ -606,7 +643,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 },
                 file_publish_reuslt = self.file_publish_rx.recv() => {
                     if let Some(result) = file_publish_reuslt {
-                        self.handle_file_publish(&mut swarm, result);
+                        let file_store_record: PublishedFileRecord = (&result).into();
+                        self.handle_file_publish(&mut swarm, result, file_store_record, true);
                     }
                 }
                 command = self.p2p_command_rx.recv() => {

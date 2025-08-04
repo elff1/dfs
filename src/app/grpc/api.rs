@@ -95,7 +95,7 @@ impl Dfs for DfsGrpcService {
             Status::internal(err_str)
         })?;
 
-        log::info!(target: LOG_TARGET, "Download metadata: {metadata:?}");
+        log::info!(target: LOG_TARGET, "Download metadata of [{}]", metadata.map_or("".to_string(), |m| m.original_file_name));
 
         Ok(Response::new(DownloadResponse {
             success: true,

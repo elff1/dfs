@@ -68,11 +68,11 @@ impl TryFrom<PublishedFileRecord> for Vec<u8> {
     }
 }
 
-impl TryFrom<Vec<u8>> for PublishedFileRecord {
+impl TryFrom<&[u8]> for PublishedFileRecord {
     type Error = serde_cbor::Error;
 
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        serde_cbor::from_slice(&value)
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(value)
     }
 }
 
@@ -85,6 +85,9 @@ pub trait Store {
         &self,
         file_id: u64,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError>;
+    fn get_all_published_files(
+        &self,
+    ) -> Result<impl Iterator<Item = PublishedFileRecord> + Send, FileStoreError>;
 
     fn get_published_file_chunks_directory(&self, file_id: u64) -> Result<PathBuf, FileStoreError> {
         let record = self

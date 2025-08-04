@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::file_store::{FileProcessResultHash, FileStoreError, PublishedFileRecord, Store};
 
-// const LOG_TARGET: &str = "file_store::rocksdb";
+const LOG_TARGET: &str = "file_store::rocksdb";
 const PUBLISHED_FILES_COLUMN_FAMILY_NAME: &str = "published_files";
 
 #[derive(Debug, Error)]
@@ -68,8 +68,34 @@ impl RocksDb {
         Ok(self
             .db
             .get_cf(cf, FileProcessResultHash::new(file_id).to_array())?
-            .map(PublishedFileRecord::try_from)
+            .map(|value| value.as_slice().try_into())
             .transpose()?)
+    }
+
+    fn get_all_published_file_inner(
+        &self,
+    ) -> Result<impl Iterator<Item = PublishedFileRecord> + Send, RocksDbStoreError> {
+        let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
+        Ok(self
+            .db
+            .iterator_cf(cf, rocksdb::IteratorMode::Start)
+            .filter_map(|record| {
+                record
+                    .map_err(|e| {
+                        log::warn!(target: LOG_TARGET, "Get all published files, find DB error: {e}");
+                    })
+                    .ok()
+            })
+            .filter_map(|(_, value)| {
+                value
+                    .as_ref()
+                    .try_into()
+                    .map_err(|e| {
+                        log::warn!(target: LOG_TARGET, "Get all published files, find cbor error: {e}");
+                    })
+                    .ok()
+            })
+        )
     }
 }
 
@@ -87,5 +113,11 @@ impl Store for RocksDb {
         file_id: u64,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError> {
         Ok(self.get_published_file_inner(file_id)?)
+    }
+
+    fn get_all_published_files(
+        &self,
+    ) -> Result<impl Iterator<Item = PublishedFileRecord> + Send, FileStoreError> {
+        Ok(self.get_all_published_file_inner()?)
     }
 }
