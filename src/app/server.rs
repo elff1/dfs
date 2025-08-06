@@ -10,6 +10,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    download::{DownloadCommand, DownloadService, DownloadServicekError},
     grpc::{GrpcService, GrpcServiceError},
     p2p::{
         config::P2pServiceConfig,
@@ -18,7 +19,6 @@ use super::{
 };
 use crate::{
     cli::Cli,
-    file_processor::FileProcessResult,
     file_store::rocksdb::{RocksDb, RocksDbStoreError},
 };
 
@@ -50,6 +50,9 @@ pub enum ServerError {
 
     #[error("gRPC service error: {0}")]
     GrpcService(#[from] GrpcServiceError),
+
+    #[error("Download service error: {0}")]
+    DownloadService(#[from] DownloadServicekError),
 
     #[error("RocksDB store error: {0}")]
     RocksDbStore(#[from] RocksDbStoreError),
@@ -98,23 +101,29 @@ impl Server {
     pub async fn start(&self) -> ServerResult<()> {
         self.init_base_path().await?;
 
-        let (file_publish_tx, file_publish_rx) = mpsc::channel::<FileProcessResult>(100);
+        let file_store = Arc::new(RocksDb::new(self.cli.base_path.join("file_store"))?);
+
         let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(100);
+        let (download_command_tx, download_command_rx) = mpsc::channel::<DownloadCommand>(100);
 
         // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file(self.cli.base_path.join("keys.keypair"))
                 .build(),
-            RocksDb::new(self.cli.base_path.join("file_store"))?,
-            file_publish_rx,
+            file_store.clone(),
             p2p_command_rx,
         );
         self.spawn_task(p2p_service).await?;
 
         // gRPC service
-        let grpc_service = GrpcService::new(self.cli.grpc_port, file_publish_tx, p2p_command_tx);
+        let grpc_service =
+            GrpcService::new(self.cli.grpc_port, p2p_command_tx, download_command_tx);
         self.spawn_task(grpc_service).await?;
+
+        // Download service
+        let download_service = DownloadService::new(file_store, download_command_rx);
+        self.spawn_task(download_service).await?;
 
         Ok(())
     }
@@ -122,9 +131,7 @@ impl Server {
     pub async fn spawn_task<S: Service>(&self, service: S) -> ServerResult<()> {
         let mut subtasks = self.subtasks.lock().await;
         let cancel_token = self.cancel_token.clone();
-        subtasks.push(tokio::spawn(
-            async move { service.start(cancel_token).await },
-        ));
+        subtasks.push(tokio::spawn(service.start(cancel_token)));
 
         Ok(())
     }

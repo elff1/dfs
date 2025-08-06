@@ -34,15 +34,15 @@ impl FileProcessResult {
         merkle_root: [u8; 32],
         merkle_leaves: Vec<[u8; 32]>,
         public: bool,
-    ) -> Self {
-        Self {
+    ) -> Box<Self> {
+        Box::new(Self {
             original_file_name,
             number_of_chunks,
             chunks_directory,
             merkle_root,
             merkle_leaves,
             public,
-        }
+        })
     }
 
     pub fn hash_sha256(&self) -> FileProcessResultHash {
@@ -61,11 +61,11 @@ impl Hash for FileProcessResult {
     }
 }
 
-impl TryFrom<Vec<u8>> for FileProcessResult {
+impl TryFrom<&[u8]> for Box<FileProcessResult> {
     type Error = serde_cbor::Error;
 
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        serde_cbor::from_slice(&value)
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(value)
     }
 }
 
@@ -105,7 +105,10 @@ pub struct FileProcessor();
 
 //#[tonic::async_trait]
 impl FileProcessor {
-    pub async fn process_file(file_path: String, public: bool) -> io::Result<FileProcessResult> {
+    pub async fn process_file(
+        file_path: String,
+        public: bool,
+    ) -> io::Result<Box<FileProcessResult>> {
         let file = PathBuf::from(file_path);
 
         log::debug!(target: LOG_TARGET, "Start publish: {}", file.display());
@@ -120,9 +123,23 @@ impl FileProcessor {
     pub async fn get_file_metadata<P: AsRef<Path>>(chunks_directory: P) -> io::Result<Vec<u8>> {
         fs::read(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME)).await
     }
+
+    pub async fn write_file_metadata<P: AsRef<Path>>(
+        chunks_directory: P,
+        metadata: &FileProcessResult,
+    ) -> io::Result<()> {
+        let cbor_file =
+            fs::File::create(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME))
+                .await?
+                .into_std()
+                .await;
+        serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
-async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
+async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<FileProcessResult>> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()
@@ -133,7 +150,7 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProc
         ))?;
     let mut chunk_dir = components.as_path().to_path_buf();
     chunk_dir.push(format!("chunks_{}", file_name.replace(".", "_")));
-    fs::remove_dir_all(&chunk_dir).await.unwrap_or_default();
+    let _ = fs::remove_dir_all(&chunk_dir).await;
     fs::create_dir_all(&chunk_dir).await?;
 
     log::info!(target: LOG_TARGET, "Chunk dir: {}", chunk_dir.display());
