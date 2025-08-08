@@ -19,7 +19,6 @@ use libp2p::{
     swarm::NetworkBehaviour,
     tcp, yamux,
 };
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     fs, io, select,
@@ -27,15 +26,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use self::{config::P2pServiceConfig, models::PublishedFile};
+use self::config::P2pServiceConfig;
 use super::{ServerError, Service};
 use crate::{
-    file_processor::{FileProcessResult, FileProcessResultHash, FileProcessor},
+    file_processor::{FileProcessResult, FileProcessor},
     file_store::{self, PublishedFileRecord},
 };
 
 pub mod config;
-pub mod models;
+mod models;
+pub use models::*;
 
 const LOG_TARGET: &str = "app::p2p";
 
@@ -59,28 +59,6 @@ pub enum P2pNetworkError {
     Libp2pGossipsubSubscription(#[from] SubscriptionError),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileDownloadRequest {
-    pub file_id: u64,
-    pub chunk_index: usize,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileDownloadResponse {
-    pub data: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MetadataDownloadRequest {
-    pub file_id: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum MetadataDownloadResponse {
-    Success(Vec<u8>),
-    Error(String),
-}
-
 #[derive(NetworkBehaviour)]
 pub struct P2pNetworkBehaviour {
     ping: ping::Behaviour,
@@ -91,24 +69,23 @@ pub struct P2pNetworkBehaviour {
     relay_server: relay::Behaviour,
     relay_client: relay::client::Behaviour,
     dcutr: dcutr::Behaviour,
-    file_download: cbor::Behaviour<FileDownloadRequest, FileDownloadResponse>,
-    metadata_download: cbor::Behaviour<MetadataDownloadRequest, MetadataDownloadResponse>,
+    file_download: cbor::Behaviour<FileDownloadId, FileDownloadResponse>,
 }
 
 pub enum P2pCommand {
     PublishFile(Box<FileProcessResult>),
-    RequestMetadata {
-        request: MetadataDownloadRequest,
-        tx: oneshot::Sender<Option<Box<FileProcessResult>>>,
+    DownloadFile {
+        request: FileDownloadId,
+        tx: oneshot::Sender<Option<Vec<u8>>>,
     },
 }
 
 #[derive(Debug)]
-struct MeatadataDownloadRequestData {
-    pub root_request: MetadataDownloadRequest,
-    pub tx: Option<oneshot::Sender<Option<Box<FileProcessResult>>>>,
+struct FileDownloadRequestBlock {
+    pub root_request: FileDownloadId,
+    pub tx: Option<oneshot::Sender<Option<Vec<u8>>>>,
     pub kad_get_providers_query_id: Option<QueryId>,
-    pub p2p_metadata_download_request_id: Option<OutboundRequestId>,
+    pub p2p_file_download_request_id: Option<OutboundRequestId>,
 }
 
 #[derive(Debug)]
@@ -116,7 +93,7 @@ pub struct P2pService<F: file_store::Store + Send + Sync + 'static> {
     config: P2pServiceConfig,
     file_store: Arc<F>,
     p2p_command_rx: mpsc::Receiver<P2pCommand>,
-    metadata_download_requests: Vec<MeatadataDownloadRequestData>,
+    file_download_requests: Vec<FileDownloadRequestBlock>,
 }
 
 impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
@@ -129,7 +106,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             config,
             file_store,
             p2p_command_rx,
-            metadata_download_requests: vec![],
+            file_download_requests: vec![],
         }
     }
 
@@ -223,13 +200,6 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         )],
                         request_response::Config::default(),
                     ),
-                    metadata_download: cbor::Behaviour::new(
-                        [(
-                            StreamProtocol::new("/dfs/1.0.0/metadata-download"),
-                            request_response::ProtocolSupport::Full,
-                        )],
-                        request_response::Config::default(),
-                    ),
                 })
             })
             .map_err(|e| P2pNetworkError::Libp2pSwarmBuilder(e.to_string()))?
@@ -303,18 +273,6 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 stats: _,
                 step: _,
             } => {
-                // let request_data_pos = self
-                //     .metadata_download_requests
-                //     .iter()
-                //     .position(|d| d.kad_get_providers_query_id == query_id)?;
-                // let request_data = self
-                //     .metadata_download_requests
-                //     .swap_remove(request_data_pos);
-                let request_data = self
-                    .metadata_download_requests
-                    .iter_mut()
-                    .find(|d| d.kad_get_providers_query_id == Some(query_id))?;
-
                 let get_providers_result = match result {
                     QueryResult::GetProviders(result) => Some(result),
                     _ => None,
@@ -333,14 +291,19 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     }
                 }?;
 
+                let request_block = self
+                    .file_download_requests
+                    .iter_mut()
+                    .find(|d| d.kad_get_providers_query_id == Some(query_id))?;
+
                 // Note: avoid downloading metadata more than once
-                request_data.kad_get_providers_query_id = None;
+                request_block.kad_get_providers_query_id = None;
 
                 let request_id = swarm
                     .behaviour_mut()
-                    .metadata_download
-                    .send_request(&neighbor_peer_id, request_data.root_request.clone());
-                request_data.p2p_metadata_download_request_id = Some(request_id);
+                    .file_download
+                    .send_request(&neighbor_peer_id, request_block.root_request.clone());
+                request_block.p2p_file_download_request_id = Some(request_id);
             }
             _ => {
                 log::info!(target: LOG_TARGET, "Kademlia event: {event:?}")
@@ -367,83 +330,34 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         }
     }
 
-    fn handle_file_download_event(
-        &self,
-        _swarm: &mut Swarm<P2pNetworkBehaviour>,
-        event: request_response::Event<FileDownloadRequest, FileDownloadResponse>,
-    ) {
-        match event {
-            request_response::Event::Message {
-                peer,
-                connection_id: _,
-                message,
-            } => {
-                match message {
-                    request_response::Message::Request {
-                        request_id: _,
-                        request,
-                        channel: _,
-                    } => {
-                        log::info!(target: LOG_TARGET, "File download request [{request:?}] from {peer}");
-                        // let response = FileDownloadResponse { data: vec![] }; // Placeholder for actual data
-                        // swarm
-                        //     .behaviour_mut()
-                        //     .file_download
-                        //     .send_response(request, response)?;
-                    }
-                    request_response::Message::Response {
-                        request_id: _,
-                        response,
-                    } => {
-                        log::info!(target: LOG_TARGET, "File download response [{response:?}] from {peer}");
-                    }
-                }
-            }
-            _ => log::debug!(target: LOG_TARGET, "File download event: {event:?}"),
-        }
-    }
-
-    async fn get_published_file_metadata(&self, file_id: u64) -> Result<Vec<u8>, Cow<str>> {
+    async fn get_published_file_chunk(&self, file_id: u64) -> Result<Vec<u8>, Cow<str>> {
         let dir_path = self
             .file_store
             .get_published_file_chunks_directory(file_id)
             .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Get DB record of file ID[{file_id}] failed: {e}");
-                "File ID not found"
+                let err_str = format!("Get file store record of file[{file_id}] failed: {e}");
+                log::error!(target: LOG_TARGET, "{err_str}");
+                err_str
             })?;
 
-        let metadata = FileProcessor::get_file_metadata(&dir_path).await.map_err(|e| {
-            log::error!(target: LOG_TARGET, "Read metadata file[{}] of file ID[{file_id}] failed: {e}", dir_path.display());
-            "File not exist"
-        })?;
+        let metadata = FileProcessor::get_file_metadata(&dir_path)
+            .await
+            .map_err(|e| {
+                let err_str = format!(
+                    "Read metadata file[{}] of ID[{file_id}] failed: {e}",
+                    dir_path.display()
+                );
+                log::error!(target: LOG_TARGET, "{err_str}");
+                err_str
+            })?;
 
         Ok(metadata)
     }
 
-    fn parse_metadata_download_response(
-        &self,
-        response: MetadataDownloadResponse,
-    ) -> Option<Box<FileProcessResult>> {
-        let metadata = match response {
-            MetadataDownloadResponse::Success(metadata) => metadata,
-            MetadataDownloadResponse::Error(e) => {
-                log::error!(target: LOG_TARGET, "Download metadata failed: {e}");
-                return None;
-            }
-        };
-        metadata
-            .as_slice()
-            .try_into()
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Parse metadata failed: {e}");
-            })
-            .ok()
-    }
-
-    async fn handle_metadata_download_event(
+    async fn handle_file_download_event(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        event: request_response::Event<MetadataDownloadRequest, MetadataDownloadResponse>,
+        event: request_response::Event<FileDownloadId, FileDownloadResponse>,
     ) -> Option<()> {
         match event {
             request_response::Event::Message {
@@ -456,45 +370,55 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     request,
                     channel,
                 } => {
-                    log::info!(target: LOG_TARGET, "Metadata download request [{request:?}] from {peer}");
-                    match self.get_published_file_metadata(request.file_id).await {
-                        Ok(metadata) => {
-                            swarm.behaviour_mut().metadata_download
-                                    .send_response(channel, MetadataDownloadResponse::Success(metadata))
-                                    .map_err(|_| {
-                                        log::error!(target: LOG_TARGET, "Send metadata of file ID[{}] failed", request.file_id);
-                                    }).ok()?;
-                        }
-                        Err(err_str) => {
-                            swarm.behaviour_mut().metadata_download
-                                    .send_response(channel, MetadataDownloadResponse::Error(err_str.into_owned()))
-                                    .map_err(|_| {
-                                        log::error!(target: LOG_TARGET, "Send error of download file ID[{}] metadata failed", request.file_id);
-                                    }).ok()?;
-                        }
+                    let file_id = request.file_id;
+                    let chunk_index = request.chunk_index;
+                    log::info!(target: LOG_TARGET, "Download file[{file_id}/{chunk_index}] request from {peer}");
+
+                    let response = match self.get_published_file_chunk(file_id).await {
+                        Ok(metadata) => FileDownloadResponse::Success(metadata),
+                        Err(err_str) => FileDownloadResponse::Error(err_str.into()),
                     };
+
+                    swarm
+                        .behaviour_mut()
+                        .file_download
+                        .send_response(channel, response)
+                        .map_err(|_| {
+                            log::error!(target: LOG_TARGET, "Send response of download file[{file_id}/{chunk_index}] to {peer} failed");
+                        })
+                        .ok()?;
                 }
                 request_response::Message::Response {
                     request_id,
                     response,
                 } => {
                     log::info!(target: LOG_TARGET, "Metadata download response from {peer}");
-                    let metadata = self.parse_metadata_download_response(response);
 
-                    if let Some(ref metadata) = metadata {
-                        log::info!(target: LOG_TARGET, "Metadata downloaded: [{}] with {} chunks",
-                                    metadata.original_file_name, metadata.number_of_chunks);
-                    }
+                    let metadata = match response {
+                        FileDownloadResponse::Success(metadata) => Some(metadata),
+                        FileDownloadResponse::Error(e) => {
+                            log::error!(target: LOG_TARGET, "Download metadata failed: {e}");
+                            None
+                        }
+                    };
 
-                    self.metadata_download_requests
+                    // TODO: remove from vec
+                    // let request_data_pos = self
+                    //     .metadata_download_requests
+                    //     .iter()
+                    //     .position(|d| d.kad_get_providers_query_id == query_id)?;
+                    // let request_data = self
+                    //     .metadata_download_requests
+                    //     .swap_remove(request_data_pos);
+
+                    self.file_download_requests
                         .iter_mut()
-                        .find(|d| d.p2p_metadata_download_request_id == Some(request_id))?
+                        .find(|d| d.p2p_file_download_request_id == Some(request_id))?
                         .tx
                         .take()?
                         .send(metadata)
-                        .map_err(|e| {
-                            log::error!(target: LOG_TARGET, "Send downloaded metadata of [{:?}] back failed", e.map(|m| m.original_file_name));
-                        }).ok()?;
+                        .map_err(|_| log::error!(target: LOG_TARGET, "Send file of request[{request_id}] back failed"))
+                        .ok()?;
                 }
             },
             _ => log::debug!(target: LOG_TARGET, "Metadata download event: {event:?}"),
@@ -510,21 +434,19 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         file_store_record: PublishedFileRecord,
         need_store: bool,
     ) -> Option<()> {
-        let kad_key: Vec<_> = file_store_record.key();
-        log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks on DHT: {}/{}",
-            file_store_record.original_file_name, processed_file.number_of_chunks, file_store_record.id.raw() ,hex::encode(&kad_key));
+        let file_id = file_store_record.id.raw();
+        log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks on DHT: {}_0",
+            file_store_record.original_file_name, processed_file.number_of_chunks, file_id);
 
-        let kad_value = serde_cbor::to_vec(&PublishedFile::new(
-            processed_file.number_of_chunks,
-            processed_file.merkle_root,
-        ))
-        .map_err(|e| {
-            log::error!(target: LOG_TARGET, "Cbor serialize file process result failed: {e}");
-        })
-        .ok()?;
+        let kad_key: Vec<u8> = (&FilePublishId::new(file_id, 0))
+            .try_into()
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Check whether file is published failed: {e}");
+            })
+            .ok()?;
+        let kad_record = Record::new(kad_key, processed_file.merkle_root.to_vec());
+        let kad_key = kad_record.key.clone();
 
-        let kad_record = Record::new(kad_key, kad_value);
-        let key = kad_record.key.clone();
         swarm
             .behaviour_mut()
             .kademlia
@@ -534,7 +456,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         swarm
             .behaviour_mut()
             .kademlia
-            .start_providing(key)
+            .start_providing(kad_key)
             .map_err(|e| log::error!(target: LOG_TARGET, "Provide new record to DHT failed: {e}"))
             .ok();
 
@@ -547,14 +469,19 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         Some(())
     }
 
-    fn handle_request_metadata(
+    fn handle_file_download(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        request: MetadataDownloadRequest,
-        tx: oneshot::Sender<Option<Box<FileProcessResult>>>,
+        request: FileDownloadId,
+        tx: oneshot::Sender<Option<Vec<u8>>>,
     ) -> Option<()> {
         let file_id = request.file_id;
-        let file_exists = self.file_store.published_file_exists(file_id).map_err(|e| {
+        let chunk_index = request.chunk_index;
+        log::info!(target: LOG_TARGET, "Start to download chunk[{chunk_index}] of file[{file_id}]");
+
+        // TODO: check file exists for metadata download only
+        if chunk_index == 0 {
+            let file_exists = self.file_store.published_file_exists(file_id).map_err(|e| {
                 log::error!(target: LOG_TARGET, "Check whether file is published failed: {e}");
             })
             .into_iter()
@@ -563,25 +490,34 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             }))
             .any(|b| b);
 
-        if file_exists {
-            log::warn!(target: LOG_TARGET, "No need to download file [{file_id}]");
-            tx.send(None)
+            if file_exists {
+                log::warn!(target: LOG_TARGET, "No need to download file [{file_id}]");
+                tx.send(None)
                 .map_err(|_| {
                     log::error!(target: LOG_TARGET, "Send None metadata of file [{file_id}] back failed");
                 }).ok()?;
 
-            return Some(());
+                return Some(());
+            }
         }
 
-        let key = RecordKey::new(&FileProcessResultHash::new(file_id).to_array());
-        let query_id = swarm.behaviour_mut().kademlia.get_providers(key);
-        self.metadata_download_requests
-            .push(MeatadataDownloadRequestData {
-                root_request: request,
-                tx: Some(tx),
-                kad_get_providers_query_id: Some(query_id),
-                p2p_metadata_download_request_id: None,
-            });
+        let kad_key: Vec<u8> = (&request)
+            .try_into()
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Check whether file is published failed: {e}");
+            })
+            .ok()?;
+        let query_id = swarm
+            .behaviour_mut()
+            .kademlia
+            .get_providers(RecordKey::new(&kad_key));
+
+        self.file_download_requests.push(FileDownloadRequestBlock {
+            root_request: request,
+            tx: Some(tx),
+            kad_get_providers_query_id: Some(query_id),
+            p2p_file_download_request_id: None,
+        });
 
         Some(())
     }
@@ -592,8 +528,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 let file_store_record: PublishedFileRecord = file_process_result.as_ref().into();
                 self.handle_file_publish(swarm, &file_process_result, file_store_record, true);
             }
-            P2pCommand::RequestMetadata { request, tx } => {
-                self.handle_request_metadata(swarm, request, tx);
+            P2pCommand::DownloadFile { request, tx } => {
+                self.handle_file_download(swarm, request, tx);
             }
         }
     }
@@ -671,8 +607,9 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         P2pNetworkBehaviourEvent::RelayServer(event) => log::debug!(target: LOG_TARGET, "RelayServer event: {event:?}"),
                         P2pNetworkBehaviourEvent::RelayClient(event) => log::debug!(target: LOG_TARGET, "RelayClient event: {event:?}"),
                         P2pNetworkBehaviourEvent::Dcutr(event) => log::debug!(target: LOG_TARGET, "DCUTR event: {event:?}"),
-                        P2pNetworkBehaviourEvent::FileDownload(event) => self.handle_file_download_event(&mut swarm, event),
-                        P2pNetworkBehaviourEvent::MetadataDownload(event) => self.handle_metadata_download_event(&mut swarm, event).await.unwrap_or_default(),
+                        P2pNetworkBehaviourEvent::FileDownload(event) => {
+                            self.handle_file_download_event(&mut swarm, event).await.unwrap_or_default();
+                        }
                         _ => log::debug!(target: LOG_TARGET, "{event:?}"),
                     },
                     _ => log::debug!(target: LOG_TARGET, "Unhandled event: {event:?}"),

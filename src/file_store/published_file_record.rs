@@ -48,11 +48,11 @@ impl From<&FileProcessResult> for PublishedFileRecord {
     }
 }
 
-impl TryFrom<PublishedFileRecord> for Vec<u8> {
+impl TryFrom<&PublishedFileRecord> for Vec<u8> {
     type Error = serde_cbor::Error;
 
-    fn try_from(value: PublishedFileRecord) -> Result<Self, Self::Error> {
-        serde_cbor::to_vec(&value)
+    fn try_from(value: &PublishedFileRecord) -> Result<Self, Self::Error> {
+        serde_cbor::to_vec(value)
     }
 }
 

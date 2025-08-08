@@ -1,16 +1,41 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PublishedFile {
-    pub number_of_chunks: u64,
-    pub merkle_root: [u8; 32],
+pub type FilePublishId = FileDownloadId;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FileDownloadId {
+    pub file_id: u64,
+    // 0: metadata, 1..n: chunks
+    pub chunk_index: usize,
 }
 
-impl PublishedFile {
-    pub fn new(number_of_chunks: u64, merkle_root: [u8; 32]) -> Self {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum FileDownloadResponse {
+    Success(Vec<u8>),
+    Error(String),
+}
+
+impl FileDownloadId {
+    pub fn new(file_id: u64, chunk_index: usize) -> Self {
         Self {
-            number_of_chunks,
-            merkle_root,
+            file_id,
+            chunk_index,
         }
+    }
+}
+
+impl TryFrom<&FileDownloadId> for Vec<u8> {
+    type Error = serde_cbor::Error;
+
+    fn try_from(value: &FileDownloadId) -> Result<Self, Self::Error> {
+        serde_cbor::to_vec(value)
+    }
+}
+
+impl TryFrom<&[u8]> for FileDownloadId {
+    type Error = serde_cbor::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(value)
     }
 }

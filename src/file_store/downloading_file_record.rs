@@ -17,11 +17,11 @@ impl DownloadingFileRecord {
     }
 }
 
-impl TryFrom<DownloadingFileRecord> for Vec<u8> {
+impl TryFrom<&DownloadingFileRecord> for Vec<u8> {
     type Error = serde_cbor::Error;
 
-    fn try_from(value: DownloadingFileRecord) -> Result<Self, Self::Error> {
-        serde_cbor::to_vec(&value)
+    fn try_from(value: &DownloadingFileRecord) -> Result<Self, Self::Error> {
+        serde_cbor::to_vec(value)
     }
 }
 

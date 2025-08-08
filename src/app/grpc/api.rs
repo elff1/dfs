@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
@@ -7,9 +9,9 @@ use super::dfs_grpc::{
 use crate::{
     app::{
         download::DownloadCommand,
-        p2p::{MetadataDownloadRequest, P2pCommand},
+        p2p::{FileDownloadId, P2pCommand},
     },
-    file_processor::{FileProcessResultHash, FileProcessor},
+    file_processor::{FileProcessResult, FileProcessResultHash, FileProcessor},
 };
 
 const LOG_TARGET: &str = "app::grpc::api";
@@ -29,6 +31,47 @@ impl DfsGrpcService {
             p2p_command_tx,
             download_command_tx,
         }
+    }
+}
+
+impl DfsGrpcService {
+    async fn download_inner(
+        &self,
+        DownloadRequest {
+            file_id,
+            download_path,
+        }: DownloadRequest,
+    ) -> Result<(), Cow<str>> {
+        let (tx, rx) = oneshot::channel();
+        self.p2p_command_tx
+            .send(P2pCommand::DownloadFile {
+                request: FileDownloadId::new(file_id, 0),
+                tx,
+            })
+            .await
+            .map_err(|e| format!("Send metadata request to P2P service failed: {e}"))?;
+
+        let metadata: Box<FileProcessResult> = rx
+            .await
+            .map_err(|e| format!("Receive metadata from P2P service failed: {e}"))?
+            .ok_or("Download [None] metadata")?
+            .as_slice()
+            .try_into()
+            .map_err(|e| format!("Parse metadata failed: {e}"))?;
+
+        log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id} | {}] with {} chunks",
+            metadata.original_file_name, metadata.number_of_chunks);
+
+        self.download_command_tx
+            .send(DownloadCommand::OneFile {
+                id: FileProcessResultHash::new(file_id),
+                metadata,
+                download_path: download_path.into(),
+            })
+            .await
+            .map_err(|e| format!("Send download file command to download service failed: {e}"))?;
+
+        Ok(())
     }
 }
 
@@ -79,54 +122,12 @@ impl Dfs for DfsGrpcService {
         &self,
         request: Request<DownloadRequest>,
     ) -> Result<Response<DownloadResponse>, Status> {
-        let request_str = format!("{request:?}");
-        log::info!(target: LOG_TARGET, "Got download request: {request_str}");
+        log::info!(target: LOG_TARGET, "Got download request: {request:?}");
 
-        let DownloadRequest {
-            file_id,
-            download_path,
-        } = request.into_inner();
-
-        let (tx, rx) = oneshot::channel();
-        self.p2p_command_tx
-            .send(P2pCommand::RequestMetadata {
-                request: MetadataDownloadRequest { file_id },
-                tx,
-            })
-            .await
-            .map_err(|e| {
-                let err_str = format!("Send metadata request to P2P service failed: {e}");
-                log::error!(target: LOG_TARGET, "{err_str}");
-                Status::internal(err_str)
-            })?;
-
-        let metadata = rx
-            .await
-            .map_err(|e| {
-                let err_str = format!("Receive metadata from P2P service failed: {e}");
-                log::error!(target: LOG_TARGET, "{err_str}");
-                Status::internal(err_str)
-            })?
-            .ok_or_else(|| {
-                let err_str = "Download metadata failed";
-                log::error!(target: LOG_TARGET, "{err_str}");
-                Status::internal(err_str)
-            })?;
-
-        log::info!(target: LOG_TARGET, "Downloaded metadata of file {file_id} [{}]", metadata.original_file_name);
-
-        self.download_command_tx
-            .send(DownloadCommand::OneFile {
-                id: FileProcessResultHash::new(file_id),
-                metadata,
-                download_path: download_path.into(),
-            })
-            .await
-            .map_err(|e| {
-                let err_str = format!("Send download file command to download service failed: {e}");
-                log::error!(target: LOG_TARGET, "{err_str}");
-                Status::internal(err_str)
-            })?;
+        if let Err(err_str) = self.download_inner(request.into_inner()).await {
+            log::error!(target: LOG_TARGET, "{err_str}");
+            return Err(Status::internal(err_str));
+        }
 
         Ok(Response::new(DownloadResponse {
             success: true,

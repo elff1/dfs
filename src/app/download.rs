@@ -62,8 +62,27 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                 download_directory: download_path,
             })?;
 
-        // TODO:
-        // start download
+        /* TODO:
+          Updata metadata download:
+          1. oneshoot send/recv vec<u8>
+          2. P2pCommand::download request, file_id, chunk_id(0: metadata, 1..n: chunks)
+          3. updata DHT record key: publish, get
+          4. handle download request event: read db, read fs, send event response
+
+          file download:
+          1. spwan a task to download chunks
+          2. publish chunks on P2P DHT
+          3. send command to P2P, download a chunk from peer like metadata (How to download parallel)
+          4. after all chunks downloaded, merge together
+          5. send command to P2P, publish file
+          6. move file id from Downloading table to pubished table
+
+          remove file from dfs system
+          1. remove record from DHT
+          2. remove record from DB
+          3. remove chunks from fs
+          4. remove file from fs if requred
+        */
 
         Ok(())
     }
