@@ -1,10 +1,12 @@
 mod server;
 pub use server::*;
 
-pub mod p2p;
+mod p2p;
 //pub use p2p::*;
 
-pub mod grpc;
+mod grpc;
 //pub use grpc::*;
 
-pub mod download;
+mod download;
+
+pub mod fs;

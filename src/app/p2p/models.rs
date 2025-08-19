@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-pub type FilePublishId = FileDownloadId;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FileDownloadId {
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, Hash, PartialEq)]
+pub struct FileChunkId {
     pub file_id: u64,
-    // 0: metadata, 1..n: chunks
+    /// 0: metadata, 1..n: chunks
     pub chunk_index: usize,
 }
 
@@ -15,7 +13,7 @@ pub enum FileDownloadResponse {
     Error(String),
 }
 
-impl FileDownloadId {
+impl FileChunkId {
     pub fn new(file_id: u64, chunk_index: usize) -> Self {
         Self {
             file_id,
@@ -24,18 +22,24 @@ impl FileDownloadId {
     }
 }
 
-impl TryFrom<&FileDownloadId> for Vec<u8> {
+impl TryFrom<&FileChunkId> for Vec<u8> {
     type Error = serde_cbor::Error;
 
-    fn try_from(value: &FileDownloadId) -> Result<Self, Self::Error> {
+    fn try_from(value: &FileChunkId) -> Result<Self, Self::Error> {
         serde_cbor::to_vec(value)
     }
 }
 
-impl TryFrom<&[u8]> for FileDownloadId {
+impl TryFrom<&[u8]> for FileChunkId {
     type Error = serde_cbor::Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         serde_cbor::from_slice(value)
+    }
+}
+
+impl std::fmt::Display for FileChunkId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{}/{}", self.file_id, self.chunk_index))
     }
 }

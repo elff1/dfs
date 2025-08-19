@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::file_processor::FileProcessResultHash;
+use crate::app::fs::FileProcessResultHash;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadingFileRecord {

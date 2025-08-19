@@ -6,12 +6,10 @@ use tonic::{Request, Response, Status};
 use super::dfs_grpc::{
     DownloadRequest, DownloadResponse, PublishFileRequest, PublishFileResponse, dfs_server::Dfs,
 };
-use crate::{
-    app::{
-        download::DownloadCommand,
-        p2p::{FileDownloadId, P2pCommand},
-    },
-    file_processor::{FileProcessResult, FileProcessResultHash, FileProcessor},
+use crate::app::{
+    download::DownloadCommand,
+    fs::{FileProcessResult, FileProcessResultHash, FileProcessor},
+    p2p::{FileChunkId, P2pCommand},
 };
 
 const LOG_TARGET: &str = "app::grpc::api";
@@ -41,11 +39,11 @@ impl DfsGrpcService {
             file_id,
             download_path,
         }: DownloadRequest,
-    ) -> Result<(), Cow<str>> {
+    ) -> Result<(), Cow<'_, str>> {
         let (tx, rx) = oneshot::channel();
         self.p2p_command_tx
             .send(P2pCommand::DownloadFile {
-                request: FileDownloadId::new(file_id, 0),
+                id: FileChunkId::new(file_id, 0),
                 tx,
             })
             .await

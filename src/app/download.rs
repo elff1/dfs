@@ -2,19 +2,19 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::{fs, io, select, sync::mpsc};
+use tokio::{io, select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
-use super::{ServerError, Service};
-use crate::{
-    file_processor::{FileProcessResult, FileProcessResultHash, FileProcessor},
-    file_store::{self, DownloadingFileRecord, FileStoreError},
+use super::{
+    ServerError, Service,
+    fs::{FileProcessResult, FileProcessResultHash, FsHelper},
 };
+use crate::file_store::{self, DownloadingFileRecord, FileStoreError};
 
 const LOG_TARGET: &str = "app::download";
 
 #[derive(Debug, Error)]
-pub enum DownloadServicekError {
+pub enum DownloadServiceError {
     #[error("I/O error: {0}")]
     IO(#[from] io::Error),
     #[error("File store error: {0}")]
@@ -48,12 +48,32 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         id: FileProcessResultHash,
         metadata: Box<FileProcessResult>,
         mut download_path: PathBuf,
-    ) -> Result<(), DownloadServicekError> {
+    ) -> Result<(), DownloadServiceError> {
         download_path.push(hex::encode(id.to_array()));
-        let _ = fs::remove_dir_all(&download_path).await;
-        fs::create_dir_all(&download_path).await?;
 
-        FileProcessor::write_file_metadata(&download_path, &metadata).await?;
+        FsHelper::create_directory(&download_path).await?;
+
+        // let (tx, rx) = oneshot::channel();
+        // self.p2p_command_tx
+        //     .send(P2pCommand::DownloadFile {
+        //         id: FileChunkId::new(file_id, 0),
+        //         tx,
+        //     })
+        //     .await
+        //     .map_err(|e| format!("Send metadata request to P2P service failed: {e}"))?;
+
+        // let metadata: Box<FileProcessResult> = rx
+        //     .await
+        //     .map_err(|e| format!("Receive metadata from P2P service failed: {e}"))?
+        //     .ok_or("Download [None] metadata")?
+        //     .as_slice()
+        //     .try_into()
+        //     .map_err(|e| format!("Parse metadata failed: {e}"))?;
+
+        // log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id} | {}] with {} chunks",
+        //     metadata.original_file_name, metadata.number_of_chunks);
+
+        FsHelper::write_file_metadata(&download_path, &metadata.merkle_root)?;
 
         self.file_store
             .add_downloading_file(DownloadingFileRecord {
@@ -63,19 +83,29 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             })?;
 
         /* TODO:
-          Updata metadata download:
+          make file processor a multi-thread service, each thread wait on a mpmc rx(using sync fs call). commands:
+          1. process file (split into chunks)
+          2. read chunk
+
+          publish file:
+          do not delete the folder
+
+          metadata download:
           1. oneshoot send/recv vec<u8>
           2. P2pCommand::download request, file_id, chunk_id(0: metadata, 1..n: chunks)
           3. updata DHT record key: publish, get
-          4. handle download request event: read db, read fs, send event response
+          4. handle download request event: read DB, read fs(file processor is multi-thread), send event response(swam is multi-thread)
 
-          file download:
-          1. spwan a task to download chunks
-          2. publish chunks on P2P DHT
-          3. send command to P2P, download a chunk from peer like metadata (How to download parallel)
-          4. after all chunks downloaded, merge together
-          5. send command to P2P, publish file
-          6. move file id from Downloading table to pubished table
+          file download (one file at a time):
+          1. publish chunks on P2P DHT
+          2. delete download folder
+          3. download metadata, write to fs(create folder automatically if not exist), record to DB Downloading table
+          4. send download chunk task to task pool submodule
+            a. send command to P2P, download a chunk from peer like metadata
+            b. check hash, write chunk to fs
+          5. after all chunks downloaded, merge together
+          6. send command to P2P, publish file
+          7. move file id from Downloading table to pubished table
 
           remove file from dfs system
           1. remove record from DHT
@@ -109,7 +139,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
     async fn start_inner(
         mut self,
         cancel_token: CancellationToken,
-    ) -> Result<(), DownloadServicekError> {
+    ) -> Result<(), DownloadServiceError> {
         loop {
             select! {
                 command = self.download_command_rx.recv() => {
@@ -131,7 +161,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
 #[async_trait]
 impl<F: file_store::Store + Send + Sync + 'static> Service for DownloadService<F> {
     async fn start(self, cancel_token: CancellationToken) -> Result<(), ServerError> {
-        log::debug!(target: LOG_TARGET, "DownloadService starting...");
+        log::info!(target: LOG_TARGET, "Download service starting...");
 
         self.start_inner(cancel_token).await?;
 

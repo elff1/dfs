@@ -10,7 +10,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    download::{DownloadCommand, DownloadService, DownloadServicekError},
+    download::{DownloadCommand, DownloadService, DownloadServiceError},
+    fs::{FsChunkCommand, FsCommand, FsService, FsServiceError},
     grpc::{GrpcService, GrpcServiceError},
     p2p::{
         config::P2pServiceConfig,
@@ -52,7 +53,10 @@ pub enum ServerError {
     GrpcService(#[from] GrpcServiceError),
 
     #[error("Download service error: {0}")]
-    DownloadService(#[from] DownloadServicekError),
+    DownloadService(#[from] DownloadServiceError),
+
+    #[error("FS service error: {0}")]
+    FsService(#[from] FsServiceError),
 
     #[error("RocksDB store error: {0}")]
     RocksDbStore(#[from] RocksDbStoreError),
@@ -103,15 +107,29 @@ impl Server {
 
         let file_store = Arc::new(RocksDb::new(self.cli.base_path.join("file_store"))?);
 
-        let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(100);
+        // in download service, spawn a download task after a P2pCommand is sent
+        let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(1);
         let (download_command_tx, download_command_rx) = mpsc::channel::<DownloadCommand>(100);
+        let (fs_command_tx, fs_command_rx) = mpsc::channel::<FsCommand>(100);
+        let (fs_chunk_command_tx, fs_chunk_command_rx) =
+            async_channel::bounded::<FsChunkCommand>(100);
+
+        // FS service
+        let fs_service = FsService::new(file_store.clone(), fs_command_rx, fs_chunk_command_rx);
+        self.spawn_task(fs_service).await?;
+
+        // Download service
+        let download_service = DownloadService::new(file_store.clone(), download_command_rx);
+        self.spawn_task(download_service).await?;
 
         // P2P service
         let p2p_service = P2pService::new(
             P2pServiceConfig::builder()
                 .with_keypair_file(self.cli.base_path.join("keys.keypair"))
                 .build(),
-            file_store.clone(),
+            file_store,
+            fs_command_tx,
+            fs_chunk_command_tx,
             p2p_command_rx,
         );
         self.spawn_task(p2p_service).await?;
@@ -120,10 +138,6 @@ impl Server {
         let grpc_service =
             GrpcService::new(self.cli.grpc_port, p2p_command_tx, download_command_tx);
         self.spawn_task(grpc_service).await?;
-
-        // Download service
-        let download_service = DownloadService::new(file_store, download_command_rx);
-        self.spawn_task(download_service).await?;
 
         Ok(())
     }

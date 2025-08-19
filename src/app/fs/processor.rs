@@ -12,9 +12,11 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
 };
 
-const LOG_TARGET: &str = "file_processor::processor";
+use super::PROCESSING_RESULT_FILE_NAME;
+
+const LOG_TARGET: &str = "app::fs::processor";
+/// chunk size 1MB
 const CHUNK_SIZE: usize = 1024 * 1024;
-const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessResult {
@@ -118,24 +120,6 @@ impl FileProcessor {
         } else {
             process_one_file(&file, public).await
         }
-    }
-
-    pub async fn get_file_metadata<P: AsRef<Path>>(chunks_directory: P) -> io::Result<Vec<u8>> {
-        fs::read(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME)).await
-    }
-
-    pub async fn write_file_metadata<P: AsRef<Path>>(
-        chunks_directory: P,
-        metadata: &FileProcessResult,
-    ) -> io::Result<()> {
-        let cbor_file =
-            fs::File::create(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME))
-                .await?
-                .into_std()
-                .await;
-        serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;
-
-        Ok(())
     }
 }
 

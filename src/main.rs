@@ -4,7 +4,6 @@ use clap::Parser;
 
 mod app;
 mod cli;
-mod file_processor;
 mod file_store;
 
 #[tokio::main]

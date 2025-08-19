@@ -21,10 +21,11 @@ rs_merkle = "1"
 hex = "0.4"
 serde_cbor = "0.11"
 rs_sha256 = "0.1"
-rocksdb = {git = "https://github.com/rust-rocksdb/rust-rocksdb.git", rev = "7da6d11e669e1467d919764e446b82edeebb00c0"}
+rocksdb = "0.24"
 clap = { version = "4", features = ["derive", "string", "env"] }
 clap_derive = "4"
 homedir = "0.3"
+async-channel = "2"
 
 [build-dependencies]
 tonic-prost-build = "*"

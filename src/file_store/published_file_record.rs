@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::file_processor::{FileProcessResult, FileProcessResultHash};
+use crate::app::fs::{FileProcessResult, FileProcessResultHash};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublishedFileRecord {

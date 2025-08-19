@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use self::rocksdb::RocksDbStoreError;
-use crate::file_processor::FileProcessResultHash;
+use crate::app::fs::FileProcessResultHash;
 
 mod downloading_file_record;
 mod published_file_record;

@@ -64,6 +64,8 @@ impl GrpcService {
 #[async_trait]
 impl Service for GrpcService {
     async fn start(self, cancel_token: CancellationToken) -> Result<(), ServerError> {
+        log::info!(target: LOG_TARGET, "gRPC service starting...");
+
         self.start_inner(cancel_token).await?;
 
         Ok(())
