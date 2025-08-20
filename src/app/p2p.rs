@@ -1,9 +1,10 @@
 use std::{
     collections::{HashMap, VecDeque},
     hash::{DefaultHasher, Hash, Hasher},
+    ops::Not,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -61,7 +62,6 @@ pub enum P2pNetworkError {
 }
 
 type FileDownloadRequest = FileChunkId;
-type FilePublishKadKey = FileChunkId;
 type FsReadChannel = (
     mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     mpsc::Receiver<(FileChunkId, Option<Vec<u8>>)>,
@@ -93,10 +93,11 @@ pub enum P2pCommand {
 
 #[derive(Debug)]
 struct FileDownloadLocalRequestBlock {
-    pub chunk_id: FileChunkId,
-    pub tx: Option<oneshot::Sender<Option<Vec<u8>>>>,
-    pub kad_get_providers_query_id: Option<QueryId>,
-    pub p2p_file_download_request_id: Option<OutboundRequestId>,
+    chunk_id: FileChunkId,
+    tx: Option<oneshot::Sender<Option<Vec<u8>>>>,
+    start_timestamp: Instant,
+    kad_get_providers_query_id: Option<QueryId>,
+    p2p_file_download_request_id: Option<OutboundRequestId>,
 }
 
 #[derive(Debug)]
@@ -113,7 +114,7 @@ pub struct P2pService<F: file_store::Store + Send + Sync + 'static> {
     p2p_command_rx: mpsc::Receiver<P2pCommand>,
 
     // inner states
-    file_download_local_requests: VecDeque<FileDownloadLocalRequestBlock>,
+    file_download_local_requests: VecDeque<Box<FileDownloadLocalRequestBlock>>,
     file_download_remote_requests: HashMap<FileChunkId, Vec<ResponseChannel<FileDownloadResponse>>>,
 }
 
@@ -300,37 +301,47 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 stats: _,
                 step: _,
             } => {
+                // handle GetProviders result only
                 let get_providers_result = match result {
                     QueryResult::GetProviders(result) => Some(result),
                     _ => None,
-                }?
-                .map_err(|e| {
-                    log::error!(target: LOG_TARGET, "Get providers failed: {e}");
-                })
-                .ok()?;
-
-                let neighbor_peer_id = match get_providers_result {
-                    kad::GetProvidersOk::FoundProviders { key: _, providers } => {
-                        providers.into_iter().next()
-                    }
-                    kad::GetProvidersOk::FinishedWithNoAdditionalRecord { mut closest_peers } => {
-                        closest_peers.pop()
-                    }
                 }?;
 
-                let request_block = self
+                let request_block_pos = self.file_download_local_requests.iter().position(
+                    |d| matches!(d.kad_get_providers_query_id, Some(id) if id == query_id),
+                )?;
+                let mut request_block = self
                     .file_download_local_requests
-                    .iter_mut()
-                    .find(|d| d.kad_get_providers_query_id == Some(query_id))?;
+                    .remove(request_block_pos)?;
 
-                // Note: avoid downloading metadata more than once
-                request_block.kad_get_providers_query_id = None;
+                let neighbor_peer_id = match get_providers_result {
+                    Ok(kad::GetProvidersOk::FoundProviders { key: _, providers }) => {
+                        providers.into_iter().next()
+                    }
+                    Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord {
+                        mut closest_peers,
+                    }) => closest_peers.pop(),
+                    Err(e) => {
+                        log::error!(target: LOG_TARGET, "Get providers of chunk[{}] failed: {e}",
+                            request_block.chunk_id);
+                        return None;
+                    }
+                }
+                .or_else(|| {
+                    log::error!(target: LOG_TARGET, "No provider of chunk[{}] found", request_block.chunk_id);
+                    None
+                })?;
 
                 let request_id = swarm
                     .behaviour_mut()
                     .file_download
                     .send_request(&neighbor_peer_id, request_block.chunk_id);
                 request_block.p2p_file_download_request_id = Some(request_id);
+
+                // Note: avoid downloading chunk more than once
+                request_block.kad_get_providers_query_id = None;
+
+                self.file_download_local_requests.push_back(request_block);
             }
             _ => {
                 log::info!(target: LOG_TARGET, "Kademlia event: {event:?}")
@@ -412,42 +423,33 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     request_id,
                     response,
                 } => {
-                    log::info!(target: LOG_TARGET, "Metadata download response from {peer}");
+                    let request_block_pos = self.file_download_local_requests.iter().position(
+                        |d| matches!(d.p2p_file_download_request_id, Some(id) if id == request_id),
+                    )?;
+                    let mut request_block = self
+                        .file_download_local_requests
+                        .remove(request_block_pos)?;
 
-                    let metadata = match response {
-                        FileDownloadResponse::Success(metadata) => Some(metadata),
+                    let contents = match response {
+                        FileDownloadResponse::Success(contents) => Some(contents),
                         FileDownloadResponse::Error(e) => {
-                            log::error!(target: LOG_TARGET, "Download metadata failed: {e}");
+                            log::error!(target: LOG_TARGET, "Download chunk[{}] failed: {e}", request_block.chunk_id);
                             None
                         }
                     };
 
-                    // TODO: remove from vec
-                    // let request_data_pos = self
-                    //     .metadata_download_requests
-                    //     .iter()
-                    //     .position(|d| d.kad_get_providers_query_id == query_id)?;
-                    // let request_data = self
-                    //     .metadata_download_requests
-                    //     .swap_remove(request_data_pos);
-
-                    let request_block = self
-                        .file_download_local_requests
-                        .iter_mut()
-                        .find(|d| d.p2p_file_download_request_id == Some(request_id))?;
                     request_block
                         .tx
                         .take()?
-                        .send(metadata)
+                        .send(contents)
                         .map_err(|_| {
-                            log::error!(target: LOG_TARGET,
-                                "Send download file chunk[{}] response to gRPC failed",
+                            log::error!(target: LOG_TARGET, "Send response of download chunk[{}] failed",
                                 request_block.chunk_id)
                         })
                         .ok()?;
                 }
             },
-            _ => log::debug!(target: LOG_TARGET, "Metadata download event: {event:?}"),
+            _ => log::debug!(target: LOG_TARGET, "File download event: {event:?}"),
         }
 
         Some(())
@@ -460,7 +462,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         contents: Option<Vec<u8>>,
     ) -> Option<()> {
         let channels = self.file_download_remote_requests.remove(&chunk_id)
-            .filter(|v| !v.is_empty()).or_else(|| {
+            .filter(|v| v.is_empty().not())
+            .or_else(|| {
                 log::warn!(target: LOG_TARGET, "File download remote request of chunk[{chunk_id}] not found");
                 None
             })?;
@@ -496,30 +499,39 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         need_store: bool,
     ) -> Option<()> {
         let file_id = file_store_record.id.raw();
-        log::info!(target: LOG_TARGET, "Publish processed file[{}] with {} chunks on DHT: {}_0",
-            file_store_record.original_file_name, processed_file.number_of_chunks, file_id);
+        log::info!(target: LOG_TARGET, "Publish processed file[{}][{file_id}] with {} chunks on DHT",
+            file_store_record.original_file_name, processed_file.number_of_chunks);
 
-        let kad_key: Vec<u8> = (&FilePublishKadKey::new(file_id, 0))
-            .try_into()
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Check whether file is published failed: {e}");
-            })
-            .ok()?;
-        let kad_record = Record::new(kad_key, processed_file.merkle_root.to_vec());
-        let kad_key = kad_record.key.clone();
+        for chunk_index in 0..=(processed_file.number_of_chunks as usize) {
+            let chunk_id = FileChunkId::new(file_id, chunk_index);
+            let kad_key: Vec<u8> = (&chunk_id)
+                .try_into()
+                .map_err(|e| {
+                    log::error!(target: LOG_TARGET, "Convert [{chunk_id}] into kad_key failed: {e}");
+                })
+                .ok()?;
+            let kad_record = Record::new(
+                kad_key,
+                match chunk_index {
+                    0 => processed_file.merkle_root.to_vec(),
+                    _ => processed_file.merkle_leaves[chunk_index].to_vec(),
+                },
+            );
+            let kad_key = kad_record.key.clone();
 
-        swarm
-            .behaviour_mut()
-            .kademlia
-            .put_record(kad_record, kad::Quorum::Majority)
-            .map_err(|e| log::error!(target: LOG_TARGET, "Put new record to DHT failed: {e}"))
-            .ok();
-        swarm
-            .behaviour_mut()
-            .kademlia
-            .start_providing(kad_key)
-            .map_err(|e| log::error!(target: LOG_TARGET, "Provide new record to DHT failed: {e}"))
-            .ok();
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(kad_record, kad::Quorum::Majority)
+                .map_err(|e| log::error!(target: LOG_TARGET, "Put new record[{chunk_id}] to DHT failed: {e}"))
+                .ok();
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .start_providing(kad_key)
+                .map_err(|e| log::error!(target: LOG_TARGET, "Provide new record[{chunk_id}] to DHT failed: {e}"))
+                .ok();
+        }
 
         if need_store {
             self.file_store.add_published_file(file_store_record).unwrap_or_else(|e| {
@@ -555,7 +567,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 log::warn!(target: LOG_TARGET, "No need to download file[{file_id}]");
                 return tx.send(None)
                     .map_err(|_| {
-                        log::error!(target: LOG_TARGET, "Send None metadata of file[{file_id}] back failed");
+                        log::error!(target: LOG_TARGET, "Send response of download file[{file_id}] failed");
                     }).ok();
             }
         }
@@ -572,12 +584,13 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             .get_providers(RecordKey::new(&kad_key));
 
         self.file_download_local_requests
-            .push_back(FileDownloadLocalRequestBlock {
+            .push_back(Box::new(FileDownloadLocalRequestBlock {
                 chunk_id,
                 tx: Some(tx),
+                start_timestamp: Instant::now(),
                 kad_get_providers_query_id: Some(query_id),
                 p2p_file_download_request_id: None,
-            });
+            }));
 
         Some(())
     }
@@ -599,23 +612,42 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         }
     }
 
+    fn handle_tick(&mut self) {
+        while let Some(request_block) = self.file_download_local_requests.pop_front() {
+            let (timeout, err_str) = if request_block.kad_get_providers_query_id.is_some() {
+                (Duration::from_secs(20), "Get providers")
+            } else {
+                (Duration::from_secs(100), "Download contents")
+            };
+
+            if request_block.start_timestamp.elapsed() < timeout {
+                self.file_download_local_requests.push_front(request_block);
+                break;
+            }
+
+            log::error!(target: LOG_TARGET, "{} for chunk[{}] timeout", err_str, request_block.chunk_id)
+        }
+    }
+
     async fn publish_one_stored_file(
         &self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         file_store_record: PublishedFileRecord,
     ) -> Option<()> {
-        let metadata: Box<FileProcessResult> = FsHelper::read_file_metadata(&file_store_record.chunks_directory)
-            .await
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Read metadata file[{}] of file ID[{}] failed: {e}",
-                    file_store_record.chunks_directory.display(), file_store_record.id.raw());
-            })
-            .and_then(|metadata| {
-                metadata.as_slice().try_into().map_err(|e| {
-                    log::error!(target: LOG_TARGET, "Parse metadata of file ID[{}] failed: {e}", file_store_record.id.raw());
+        let metadata: Box<FileProcessResult> =
+            FsHelper::read_file_metadata(&file_store_record.chunks_directory)
+                .await
+                .map_err(|e| {
+                    log::error!(target: LOG_TARGET, "Read metadata file[{}] ID[{}] failed: {e}",
+                        file_store_record.chunks_directory.display(), file_store_record.id.raw());
                 })
-            })
-            .ok()?;
+                .and_then(|metadata| {
+                    metadata.as_slice().try_into().map_err(|e| {
+                        log::error!(target: LOG_TARGET, "Parse metadata of file[{}] failed: {e}",
+                            file_store_record.id.raw());
+                    })
+                })
+                .ok()?;
 
         self.handle_command_publish_file(swarm, &metadata, file_store_record, false)
     }
@@ -647,6 +679,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             .subscribe(&file_owners_topic)?;
 
         self.publish_stored_files(&mut swarm).await;
+
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
 
         loop {
             select! {
@@ -691,21 +725,12 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         self.handle_command(&mut swarm, command);
                     }
                 },
+                _ = interval.tick() => self.handle_tick(),
                 _ = cancel_token.cancelled() => {
                     log::info!(target: LOG_TARGET, "P2P service is shutting down...");
                     break;
                 },
             }
-        }
-
-        // send response to gRPC for unhandled requests
-        for request_block in self.file_download_local_requests {
-            request_block.tx.map(|tx| {
-                tx.send(None).map_err(|_| {
-                    log::error!(target: LOG_TARGET, "Send download file chunk[{}] response to gRPC failed",
-                        request_block.chunk_id)
-                })
-            });
         }
 
         Ok(())
@@ -726,6 +751,18 @@ impl<F: file_store::Store + Send + Sync + 'static> Service for P2pService<F> {
     //     // Logic to stop the P2P service
     //     Ok(())
     // }
+}
+
+impl Drop for FileDownloadLocalRequestBlock {
+    fn drop(&mut self) {
+        self.tx.take().map(|tx| {
+            log::warn!(target: LOG_TARGET, "Download chunk[{}] timeout or failed", self.chunk_id);
+
+            tx.send(None).map_err(|_| {
+                log::error!(target: LOG_TARGET, "Send response of download chunk[{}] failed", self.chunk_id)
+            })
+        });
+    }
 }
 
 fn swarm_file_download_response(

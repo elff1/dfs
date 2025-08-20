@@ -107,9 +107,13 @@ impl Server {
 
         let file_store = Arc::new(RocksDb::new(self.cli.base_path.join("file_store"))?);
 
-        // in download service, spawn a download task after a P2pCommand is sent
+        // In download service, spawn a download task after a P2pCommand is sent.
+        // New download task has to wait for a previous task to be completed,
+        // if more than MAX_PARALLEL_DOWNLOAD_CHUNK_NUM download tasks are running.
         let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(1);
+
         let (download_command_tx, download_command_rx) = mpsc::channel::<DownloadCommand>(100);
+
         let (fs_command_tx, fs_command_rx) = mpsc::channel::<FsCommand>(100);
         let (fs_chunk_command_tx, fs_chunk_command_rx) =
             async_channel::bounded::<FsChunkCommand>(100);

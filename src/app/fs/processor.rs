@@ -21,7 +21,7 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessResult {
     pub original_file_name: String,
-    pub number_of_chunks: u64,
+    pub number_of_chunks: u32,
     pub chunks_directory: PathBuf,
     pub merkle_root: [u8; 32],
     pub merkle_leaves: Vec<[u8; 32]>,
@@ -31,7 +31,7 @@ pub struct FileProcessResult {
 impl FileProcessResult {
     pub fn new(
         original_file_name: String,
-        number_of_chunks: u64,
+        number_of_chunks: u32,
         chunks_directory: PathBuf,
         merkle_root: [u8; 32],
         merkle_leaves: Vec<[u8; 32]>,
@@ -134,7 +134,8 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
         ))?;
     let mut chunk_dir = components.as_path().to_path_buf();
     chunk_dir.push(format!("chunks_{}", file_name.replace(".", "_")));
-    let _ = fs::remove_dir_all(&chunk_dir).await;
+    // Do not delete the directory
+    // let _ = fs::remove_dir_all(&chunk_dir).await;
     fs::create_dir_all(&chunk_dir).await?;
 
     log::info!(target: LOG_TARGET, "Chunk dir: {}", chunk_dir.display());
