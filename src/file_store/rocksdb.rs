@@ -57,7 +57,7 @@ impl RocksDb {
     ) -> Result<(), RocksDbStoreError> {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         let key = record.key();
-        let value: Vec<u8> = (&record).try_into()?;
+        let value: Vec<u8> = (&record).into();
         self.db.put_cf(cf, key, value)?;
 
         Ok(())
@@ -114,7 +114,7 @@ impl RocksDb {
     ) -> Result<(), RocksDbStoreError> {
         let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
         let key = record.key();
-        let value: Vec<u8> = (&record).try_into()?;
+        let value: Vec<u8> = (&record).into();
         self.db.put_cf(cf, key, value)?;
 
         Ok(())

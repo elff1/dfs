@@ -22,11 +22,13 @@ impl FileChunkId {
     }
 }
 
-impl TryFrom<&FileChunkId> for Vec<u8> {
-    type Error = serde_cbor::Error;
-
-    fn try_from(value: &FileChunkId) -> Result<Self, Self::Error> {
+impl From<&FileChunkId> for Vec<u8> {
+    fn from(value: &FileChunkId) -> Self {
         serde_cbor::to_vec(value)
+            .map_err(|e| {
+                log::error!("serde_cbor::to_vec(FileChunkId[{value}]) failed: {e}");
+            })
+            .unwrap()
     }
 }
 

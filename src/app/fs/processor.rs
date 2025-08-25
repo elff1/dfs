@@ -9,10 +9,10 @@ use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
-    io::{self, AsyncReadExt, AsyncWriteExt},
+    io::{self, AsyncReadExt},
 };
 
-use super::PROCESSING_RESULT_FILE_NAME;
+use super::FsHelper;
 
 const LOG_TARGET: &str = "app::fs::processor";
 /// chunk size 1MB
@@ -105,7 +105,6 @@ impl From<FileProcessResultHash> for Vec<u8> {
 
 pub struct FileProcessor();
 
-//#[tonic::async_trait]
 impl FileProcessor {
     pub async fn process_file(
         file_path: String,
@@ -132,13 +131,12 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
             std::io::ErrorKind::InvalidFilename,
             file_path.to_string_lossy(),
         ))?;
-    let mut chunk_dir = components.as_path().to_path_buf();
-    chunk_dir.push(format!("chunks_{}", file_name.replace(".", "_")));
+    let mut chunks_directory = components.as_path().to_path_buf();
+    chunks_directory.push(format!("chunks_{}", file_name.replace(".", "_")));
     // Do not delete the directory
-    // let _ = fs::remove_dir_all(&chunk_dir).await;
-    fs::create_dir_all(&chunk_dir).await?;
+    FsHelper::create_directory_async(&chunks_directory, false).await?;
 
-    log::info!(target: LOG_TARGET, "Chunk dir: {}", chunk_dir.display());
+    log::info!(target: LOG_TARGET, "Chunks directory: {}", chunks_directory.display());
 
     let mut file = File::open(file_path).await?;
     let mut chunk_index = 0;
@@ -169,10 +167,7 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
         chunk_index += 1;
         merkle_leaves.push(Sha256::hash(&buf[..buf_offset]));
 
-        // Why does `fs::write(&chunk_path, &buf[..buf_offset]).await?;` turn `buf` into `OwnedBuf` first, while `File::write_all()` doesn't?
-        let mut chunk_file = File::create(chunk_dir.join(format!("chunk_{chunk_index}"))).await?;
-        chunk_file.write_all(&buf[..buf_offset]).await?;
-        chunk_file.flush().await?;
+        FsHelper::write_file_chunk(&chunks_directory, chunk_index as usize, &buf[..buf_offset])?;
 
         buf_offset = 0;
     }
@@ -184,17 +179,13 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
     let result = FileProcessResult::new(
         file_name,
         chunk_index,
-        chunk_dir,
+        chunks_directory,
         merkle_root,
         merkle_leaves,
         public,
     );
 
-    let cbor_file = fs::File::create(result.chunks_directory.join(PROCESSING_RESULT_FILE_NAME))
-        .await?
-        .into_std()
-        .await;
-    serde_cbor::to_writer(cbor_file, &result).map_err(|e| io::Error::other(e.to_string()))?;
+    FsHelper::serde_write_file_metadata(&result.chunks_directory, &result)?;
 
     Ok(result)
 }

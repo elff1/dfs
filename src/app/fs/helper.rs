@@ -1,20 +1,52 @@
 use std::{io, path::Path};
 
-use tokio::fs;
+use super::FileProcessResult;
 
-use super::PROCESSING_RESULT_FILE_NAME;
+const FILE_METADATA_NAME: &str = "metadata.cbor";
+const FILE_CHUNK_NAME: &str = "chunk_";
 
-pub struct FsHelper;
+pub struct FsHelper();
 
 impl FsHelper {
-    pub async fn create_directory<P: AsRef<Path>>(directory: P) -> io::Result<()> {
+    pub async fn create_directory_async<P: AsRef<Path>>(
+        directory: P,
+        delete_first: bool,
+    ) -> io::Result<()> {
         let directory = directory.as_ref();
-        let _ = fs::remove_dir_all(directory).await;
-        fs::create_dir_all(directory).await
+        if delete_first {
+            let _ = tokio::fs::remove_dir_all(directory).await;
+        }
+        tokio::fs::create_dir_all(directory).await
     }
 
-    pub async fn read_file_metadata<P: AsRef<Path>>(chunks_directory: P) -> io::Result<Vec<u8>> {
-        fs::read(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME)).await
+    // pub fn create_directory<P: AsRef<Path>>(directory: P) -> io::Result<()> {
+    //     let directory = directory.as_ref();
+    //     let _ = std::fs::remove_dir_all(directory);
+    //     std::fs::create_dir_all(directory)
+    // }
+
+    pub async fn read_file_metadata_async<P: AsRef<Path>>(
+        chunks_directory: P,
+    ) -> io::Result<Vec<u8>> {
+        tokio::fs::read(chunks_directory.as_ref().join(FILE_METADATA_NAME)).await
+    }
+
+    pub fn write_file_metadata<P, C>(chunks_directory: P, contents: C) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+        C: AsRef<[u8]>,
+    {
+        std::fs::write(chunks_directory.as_ref().join(FILE_METADATA_NAME), contents)
+    }
+
+    pub fn serde_write_file_metadata<P: AsRef<Path>>(
+        chunks_directory: P,
+        metadata: &FileProcessResult,
+    ) -> io::Result<()> {
+        let cbor_file = std::fs::File::create(chunks_directory.as_ref().join(FILE_METADATA_NAME))?;
+        serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;
+
+        Ok(())
     }
 
     pub fn read_file_chunk<P: AsRef<Path>>(
@@ -24,16 +56,23 @@ impl FsHelper {
         std::fs::read(
             chunks_directory
                 .as_ref()
-                .join(format!("chunk_{chunk_index}")),
+                .join(format!("{FILE_CHUNK_NAME}{chunk_index}")),
         )
     }
 
-    pub fn write_file_metadata<P: AsRef<Path>>(
+    pub fn write_file_chunk<P, C>(
         chunks_directory: P,
-        contents: &[u8],
-    ) -> io::Result<()> {
+        chunk_index: usize,
+        contents: C,
+    ) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+        C: AsRef<[u8]>,
+    {
         std::fs::write(
-            chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME),
+            chunks_directory
+                .as_ref()
+                .join(format!("{FILE_CHUNK_NAME}{chunk_index}")),
             contents,
         )
     }

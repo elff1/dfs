@@ -20,8 +20,8 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
     async fn handle_command_read_chunk(
         &self,
         chunk_id: FileChunkId,
-        tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
-    ) -> Option<()> {
+        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+    ) -> bool {
         let file_id = chunk_id.file_id;
         let chunk_index = chunk_id.chunk_index;
 
@@ -30,28 +30,32 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
             .get_published_file_chunks_directory(file_id)
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Get file store record of file[{file_id}] failed: {e}");
-            })
-            .ok()?;
+            });
 
-        let chunk = FsHelper::read_file_chunk(&chunks_directory, chunk_index)
-            .map_err(|e| {
+        let chunk = chunks_directory.and_then(|chunks_directory| {
+            FsHelper::read_file_chunk(&chunks_directory, chunk_index).map_err(|e| {
                 log::error!(target: LOG_TARGET, "Read chunk[{chunk_id}] at [{}] failed: {e}",
                     chunks_directory.display());
             })
-            .ok();
+        });
 
-        tx.send((FileChunkId::new(file_id, chunk_index), chunk))
+        read_contents_tx
+            .send((FileChunkId::new(file_id, chunk_index), chunk.ok()))
             .await
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Send chunk[{chunk_id}] failed: {e}");
             })
-            .ok()
+            .is_ok()
     }
 
     async fn handle_command(&mut self, command: FsChunkCommand) -> Option<()> {
         match command {
-            FsChunkCommand::Read { chunk_id, tx } => {
-                self.handle_command_read_chunk(chunk_id, tx).await?;
+            FsChunkCommand::Read {
+                chunk_id,
+                read_contents_tx,
+            } => {
+                self.handle_command_read_chunk(chunk_id, read_contents_tx)
+                    .await;
             }
         }
 

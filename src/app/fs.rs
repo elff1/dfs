@@ -19,7 +19,6 @@ use worker::*;
 
 const LOG_TARGET: &str = "app::fs";
 const FS_CHUNK_WORKER_NUM: usize = 8;
-const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
 
 #[derive(Debug, Error)]
 pub enum FsServiceError {
@@ -30,7 +29,7 @@ pub enum FsServiceError {
 pub enum FsCommand {
     ReadMetadata {
         file_id: u64,
-        tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     },
     // WriteMetadata {
     //     file_id: u64,
@@ -42,7 +41,7 @@ pub enum FsCommand {
 pub enum FsChunkCommand {
     Read {
         chunk_id: FileChunkId,
-        tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     },
     // Write {
     //     chunk_id: FileChunkId,
@@ -74,50 +73,43 @@ impl<F: file_store::Store + Send + Sync + 'static> FsService<F> {
     async fn handle_command_read_metadata(
         &self,
         file_id: u64,
-        tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
-    ) -> Option<()> {
+        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+    ) -> bool {
         let chunks_directory = self
             .file_store
             .get_published_file_chunks_directory(file_id)
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Get file store record of file[{file_id}] failed: {e}");
-            })
-            .ok()?;
+            });
 
-        let metadata = FsHelper::read_file_metadata(&chunks_directory)
-            .await
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Read metadata of file[{file_id}] at [{}] failed: {e}",
-                    chunks_directory.display());
-            })
-            .ok();
+        let metadata = match chunks_directory {
+            Err(_) => None,
+            Ok(chunks_directory) =>
+                FsHelper::read_file_metadata_async(&chunks_directory)
+                    .await
+                    .map_err(|e| {
+                        log::error!(target: LOG_TARGET, "Read metadata of file[{file_id}] at [{}] failed: {e}",
+                            chunks_directory.display());
+                    }).ok()
+        };
 
-        tx.send((FileChunkId::new(file_id, 0), metadata))
+        read_contents_tx
+            .send((FileChunkId::new(file_id, 0), metadata))
             .await
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Send metadata of file[{file_id}] failed: {e}");
             })
-            .ok()
+            .is_ok()
     }
-
-    // pub async fn write_file_metadata<P: AsRef<Path>>(
-    //     chunks_directory: P,
-    //     metadata: &FileProcessResult,
-    // ) -> io::Result<()> {
-    //     let cbor_file =
-    //         fs::File::create(chunks_directory.as_ref().join(PROCESSING_RESULT_FILE_NAME))
-    //             .await?
-    //             .into_std()
-    //             .await;
-    //     serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;
-
-    //     Ok(())
-    // }
 
     async fn handle_command(&mut self, command: FsCommand) -> Option<()> {
         match command {
-            FsCommand::ReadMetadata { file_id, tx } => {
-                self.handle_command_read_metadata(file_id, tx).await?;
+            FsCommand::ReadMetadata {
+                file_id,
+                read_contents_tx,
+            } => {
+                self.handle_command_read_metadata(file_id, read_contents_tx)
+                    .await;
             }
         }
 

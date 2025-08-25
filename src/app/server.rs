@@ -107,9 +107,9 @@ impl Server {
 
         let file_store = Arc::new(RocksDb::new(self.cli.base_path.join("file_store"))?);
 
-        // In download service, spawn a download task after a P2pCommand is sent.
-        // New download task has to wait for a previous task to be completed,
-        // if more than MAX_PARALLEL_DOWNLOAD_CHUNK_NUM download tasks are running.
+        // In download service, spawn a download task after DownloadChunk P2pCommand is sent.
+        // New download task has to wait for a previous task completed.
+        // On-going download tasks should no more than MAX_PARALLEL_DOWNLOAD_CHUNK_NUM.
         let (p2p_command_tx, p2p_command_rx) = mpsc::channel::<P2pCommand>(1);
 
         let (download_command_tx, download_command_rx) = mpsc::channel::<DownloadCommand>(100);

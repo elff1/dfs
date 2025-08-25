@@ -17,11 +17,13 @@ impl DownloadingFileRecord {
     }
 }
 
-impl TryFrom<&DownloadingFileRecord> for Vec<u8> {
-    type Error = serde_cbor::Error;
-
-    fn try_from(value: &DownloadingFileRecord) -> Result<Self, Self::Error> {
+impl From<&DownloadingFileRecord> for Vec<u8> {
+    fn from(value: &DownloadingFileRecord) -> Self {
         serde_cbor::to_vec(value)
+            .map_err(|e| {
+                log::error!("serde_cbor::to_vec(DownloadingFileRecord[{value:?}]) failed: {e}");
+            })
+            .unwrap()
     }
 }
 

@@ -51,7 +51,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
     ) -> Result<(), DownloadServiceError> {
         download_path.push(hex::encode(id.to_array()));
 
-        FsHelper::create_directory(&download_path).await?;
+        FsHelper::create_directory_async(&download_path, true).await?;
 
         // let (tx, rx) = oneshot::channel();
         // self.p2p_command_tx

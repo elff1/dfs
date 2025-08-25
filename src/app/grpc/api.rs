@@ -44,7 +44,7 @@ impl DfsGrpcService {
         self.p2p_command_tx
             .send(P2pCommand::DownloadFile {
                 id: FileChunkId::new(file_id, 0),
-                tx,
+                downloaded_contents_tx: tx,
             })
             .await
             .map_err(|e| format!("Send metadata request to P2P service failed: {e}"))?;
