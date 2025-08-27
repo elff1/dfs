@@ -2,34 +2,26 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::fs::{FileProcessResult, FileProcessResultHash};
+use crate::{FileId, app::fs::FileProcessResult};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublishedFileRecord {
-    pub id: FileProcessResultHash,
+    pub file_id: FileId,
     pub original_file_name: String,
     pub chunks_directory: PathBuf,
     pub public: bool,
 }
 
 impl PublishedFileRecord {
-    // pub fn new(original_file_name: String, chunks_dirctory: PathBuf, public: bool) -> Self {
-    //     Self {
-    //         original_file_name,
-    //         chunks_dirctory,
-    //         public,
-    //     }
-    // }
-
     pub fn key(&self) -> Vec<u8> {
-        self.id.into()
+        self.file_id.into()
     }
 }
 
 impl From<FileProcessResult> for PublishedFileRecord {
     fn from(result: FileProcessResult) -> Self {
         Self {
-            id: result.hash_sha256(),
+            file_id: result.hash_sha256(),
             original_file_name: result.original_file_name,
             chunks_directory: result.chunks_directory,
             public: result.public,
@@ -40,7 +32,7 @@ impl From<FileProcessResult> for PublishedFileRecord {
 impl From<&FileProcessResult> for PublishedFileRecord {
     fn from(result: &FileProcessResult) -> Self {
         Self {
-            id: result.hash_sha256(),
+            file_id: result.hash_sha256(),
             original_file_name: result.original_file_name.clone(),
             chunks_directory: result.chunks_directory.clone(),
             public: result.public,

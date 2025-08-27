@@ -13,6 +13,7 @@ use tokio::{
 };
 
 use super::FsHelper;
+use crate::FileId;
 
 const LOG_TARGET: &str = "app::fs::processor";
 /// chunk size 1MB
@@ -47,10 +48,10 @@ impl FileProcessResult {
         })
     }
 
-    pub fn hash_sha256(&self) -> FileProcessResultHash {
+    pub fn hash_sha256(&self) -> FileId {
         let mut hasher = Sha256Hasher::default();
         self.hash(&mut hasher);
-        FileProcessResultHash(hasher.finish())
+        FileId::new(hasher.finish())
     }
 }
 
@@ -68,38 +69,6 @@ impl TryFrom<&[u8]> for Box<FileProcessResult> {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         serde_cbor::from_slice(value)
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
-pub struct FileProcessResultHash(u64);
-
-impl FileProcessResultHash {
-    pub fn new(hash: u64) -> Self {
-        Self(hash)
-    }
-
-    pub fn raw(&self) -> u64 {
-        self.0
-    }
-
-    pub fn to_array(self) -> [u8; 8] {
-        self.0.to_be_bytes()
-    }
-}
-
-impl TryFrom<&[u8]> for FileProcessResultHash {
-    type Error = ();
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let value: [u8; 8] = value.try_into().map_err(|_| {})?;
-        Ok(Self(u64::from_be_bytes(value)))
-    }
-}
-
-impl From<FileProcessResultHash> for Vec<u8> {
-    fn from(value: FileProcessResultHash) -> Self {
-        value.to_array().to_vec()
     }
 }
 

@@ -4,7 +4,7 @@ use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{FsChunkCommand, FsHelper, FsServiceError};
-use crate::{app::p2p::FileChunkId, file_store};
+use crate::{FileChunkId, file_store};
 
 const LOG_TARGET: &str = "app::fs::worker";
 

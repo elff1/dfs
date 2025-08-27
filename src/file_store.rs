@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use self::rocksdb::RocksDbStoreError;
-use crate::app::fs::FileProcessResultHash;
+use crate::FileId;
 
 mod downloading_file_record;
 mod published_file_record;
@@ -16,7 +16,7 @@ pub enum FileStoreError {
     #[error("RocksDB store error: {0}")]
     RocksDbStore(#[from] RocksDbStoreError),
     #[error("Published file ID[{0}] not found")]
-    PublishedFileNotFound(u64),
+    PublishedFileNotFound(FileId),
     // #[error("Downloading file ID[{0}] not found")]
     // DownloadingFileNotFound(u64),
 }
@@ -26,16 +26,19 @@ pub enum FileStoreError {
 pub trait Store {
     // published file
     fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError>;
-    fn published_file_exists(&self, file_id: u64) -> Result<bool, FileStoreError>;
+    fn published_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError>;
     fn get_published_file(
         &self,
-        file_id: u64,
+        file_id: FileId,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError>;
     fn get_all_published_files(
         &self,
     ) -> Result<impl Iterator<Item = PublishedFileRecord> + Send, FileStoreError>;
 
-    fn get_published_file_chunks_directory(&self, file_id: u64) -> Result<PathBuf, FileStoreError> {
+    fn get_published_file_chunks_directory(
+        &self,
+        file_id: FileId,
+    ) -> Result<PathBuf, FileStoreError> {
         let record = self
             .get_published_file(file_id)?
             .ok_or(FileStoreError::PublishedFileNotFound(file_id))?;
@@ -44,10 +47,10 @@ pub trait Store {
 
     // downloading file
     fn add_downloading_file(&self, record: DownloadingFileRecord) -> Result<(), FileStoreError>;
-    fn downloading_file_exists(&self, file_id: u64) -> Result<bool, FileStoreError>;
+    fn downloading_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError>;
     fn get_downloading_file(
         &self,
-        file_id: u64,
+        file_id: FileId,
     ) -> Result<Option<DownloadingFileRecord>, FileStoreError>;
     fn get_all_downloading_files(
         &self,

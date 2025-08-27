@@ -123,7 +123,11 @@ impl Server {
         self.spawn_task(fs_service).await?;
 
         // Download service
-        let download_service = DownloadService::new(file_store.clone(), download_command_rx);
+        let download_service = DownloadService::new(
+            file_store.clone(),
+            p2p_command_tx.clone(),
+            download_command_rx,
+        );
         self.spawn_task(download_service).await?;
 
         // P2P service

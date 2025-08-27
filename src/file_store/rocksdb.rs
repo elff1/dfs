@@ -3,9 +3,8 @@ use std::path::Path;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options};
 use thiserror::Error;
 
-use crate::file_store::{
-    DownloadingFileRecord, FileProcessResultHash, FileStoreError, PublishedFileRecord, Store,
-};
+use super::{DownloadingFileRecord, FileStoreError, PublishedFileRecord, Store};
+use crate::FileId;
 
 const LOG_TARGET: &str = "file_store::rocksdb";
 const PUBLISHED_FILES_COLUMN_FAMILY_NAME: &str = "published_files";
@@ -63,21 +62,19 @@ impl RocksDb {
         Ok(())
     }
 
-    fn published_file_exists_inner(&self, file_id: u64) -> Result<bool, RocksDbStoreError> {
+    fn published_file_exists_inner(&self, file_id: FileId) -> Result<bool, RocksDbStoreError> {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
-        Ok(self
-            .db
-            .key_may_exist_cf(cf, FileProcessResultHash::new(file_id).to_array()))
+        Ok(self.db.key_may_exist_cf(cf, file_id.to_array()))
     }
 
     fn get_published_file_inner(
         &self,
-        file_id: u64,
+        file_id: FileId,
     ) -> Result<Option<PublishedFileRecord>, RocksDbStoreError> {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self
             .db
-            .get_cf(cf, FileProcessResultHash::new(file_id).to_array())?
+            .get_cf(cf, file_id.to_array())?
             .map(|value| value.as_slice().try_into())
             .transpose()?)
     }
@@ -120,21 +117,19 @@ impl RocksDb {
         Ok(())
     }
 
-    fn downloading_file_exists_inner(&self, file_id: u64) -> Result<bool, RocksDbStoreError> {
+    fn downloading_file_exists_inner(&self, file_id: FileId) -> Result<bool, RocksDbStoreError> {
         let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
-        Ok(self
-            .db
-            .key_may_exist_cf(cf, FileProcessResultHash::new(file_id).to_array()))
+        Ok(self.db.key_may_exist_cf(cf, file_id.to_array()))
     }
 
     fn get_downloading_file_inner(
         &self,
-        file_id: u64,
+        file_id: FileId,
     ) -> Result<Option<DownloadingFileRecord>, RocksDbStoreError> {
         let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self
             .db
-            .get_cf(cf, FileProcessResultHash::new(file_id).to_array())?
+            .get_cf(cf, file_id.to_array())?
             .map(|value| value.as_slice().try_into())
             .transpose()?)
     }
@@ -172,13 +167,13 @@ impl Store for RocksDb {
         Ok(self.add_published_file_inner(record)?)
     }
 
-    fn published_file_exists(&self, file_id: u64) -> Result<bool, FileStoreError> {
+    fn published_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError> {
         Ok(self.published_file_exists_inner(file_id)?)
     }
 
     fn get_published_file(
         &self,
-        file_id: u64,
+        file_id: FileId,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError> {
         Ok(self.get_published_file_inner(file_id)?)
     }
@@ -194,13 +189,13 @@ impl Store for RocksDb {
         Ok(self.add_downloading_file_inner(record)?)
     }
 
-    fn downloading_file_exists(&self, file_id: u64) -> Result<bool, FileStoreError> {
+    fn downloading_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError> {
         Ok(self.downloading_file_exists_inner(file_id)?)
     }
 
     fn get_downloading_file(
         &self,
-        file_id: u64,
+        file_id: FileId,
     ) -> Result<Option<DownloadingFileRecord>, FileStoreError> {
         Ok(self.get_downloading_file_inner(file_id)?)
     }

@@ -2,6 +2,9 @@ use std::sync::mpsc::channel;
 
 use clap::Parser;
 
+mod models;
+pub use models::*;
+
 mod app;
 mod cli;
 mod file_store;

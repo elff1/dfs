@@ -2,18 +2,18 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::fs::FileProcessResultHash;
+use crate::FileId;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadingFileRecord {
-    pub id: FileProcessResultHash,
+    pub file_id: FileId,
     pub original_file_name: String,
     pub download_directory: PathBuf,
 }
 
 impl DownloadingFileRecord {
     pub fn key(&self) -> Vec<u8> {
-        self.id.into()
+        self.file_id.into()
     }
 }
 

@@ -2,14 +2,21 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::{io, select, sync::mpsc};
+use tokio::{
+    io, select,
+    sync::{mpsc, oneshot},
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     ServerError, Service,
-    fs::{FileProcessResult, FileProcessResultHash, FsHelper},
+    fs::{FileProcessResult, FsHelper},
+    p2p::P2pCommand,
 };
-use crate::file_store::{self, DownloadingFileRecord, FileStoreError};
+use crate::{
+    FileChunkId, FileId,
+    file_store::{self, DownloadingFileRecord},
+};
 
 const LOG_TARGET: &str = "app::download";
 
@@ -17,14 +24,13 @@ const LOG_TARGET: &str = "app::download";
 pub enum DownloadServiceError {
     #[error("I/O error: {0}")]
     IO(#[from] io::Error),
-    #[error("File store error: {0}")]
-    FileStore(#[from] FileStoreError),
+    // #[error("File store error: {0}")]
+    // FileStore(#[from] FileStoreError),
 }
 
 pub enum DownloadCommand {
     OneFile {
-        id: FileProcessResultHash,
-        metadata: Box<FileProcessResult>,
+        file_id: FileId,
         download_path: PathBuf,
     },
 }
@@ -32,55 +38,94 @@ pub enum DownloadCommand {
 #[derive(Debug)]
 pub struct DownloadService<F: file_store::Store + Send + Sync + 'static> {
     file_store: Arc<F>,
+    p2p_command_tx: mpsc::Sender<P2pCommand>,
     download_command_rx: mpsc::Receiver<DownloadCommand>,
 }
 
 impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
-    pub fn new(file_store: Arc<F>, download_command_rx: mpsc::Receiver<DownloadCommand>) -> Self {
+    pub fn new(
+        file_store: Arc<F>,
+        p2p_command_tx: mpsc::Sender<P2pCommand>,
+        download_command_rx: mpsc::Receiver<DownloadCommand>,
+    ) -> Self {
         Self {
             file_store,
+            p2p_command_tx,
             download_command_rx,
         }
     }
 
-    async fn handle_download_one_file(
+    async fn download_metadata(
         &mut self,
-        id: FileProcessResultHash,
-        metadata: Box<FileProcessResult>,
-        mut download_path: PathBuf,
-    ) -> Result<(), DownloadServiceError> {
-        download_path.push(hex::encode(id.to_array()));
+        file_id: FileId,
+        download_directory: PathBuf,
+    ) -> Option<Box<FileProcessResult>> {
+        FsHelper::create_directory_async(&download_directory, true)
+            .await
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET,
+                    "Create download directory[{}] failed: {e}", download_directory.display());
+            })
+            .ok()?;
 
-        FsHelper::create_directory_async(&download_path, true).await?;
+        let (tx, rx) = oneshot::channel();
+        self.p2p_command_tx
+            .send(P2pCommand::DownloadFile {
+                id: FileChunkId::new(file_id, 0),
+                downloaded_contents_tx: tx,
+            })
+            .await
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET,
+                    "Send download metadata[{file_id}] request to P2P service failed: {e}");
+            })
+            .ok()?;
 
-        // let (tx, rx) = oneshot::channel();
-        // self.p2p_command_tx
-        //     .send(P2pCommand::DownloadFile {
-        //         id: FileChunkId::new(file_id, 0),
-        //         tx,
-        //     })
-        //     .await
-        //     .map_err(|e| format!("Send metadata request to P2P service failed: {e}"))?;
+        let metadata: Box<FileProcessResult> = rx
+            .await
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Receive metadata[{file_id}] from P2P service failed: {e}");
+            }).ok()?
+            .or_else(|| {
+                log::error!(target: LOG_TARGET, "Receive metadata[{file_id}]: None");
+                None
+            })?
+            .as_slice()
+            .try_into()
+            .map_err(|e| log::error!(target: LOG_TARGET, "Parse metadata[{file_id}] failed: {e}"))
+            .ok()?;
 
-        // let metadata: Box<FileProcessResult> = rx
-        //     .await
-        //     .map_err(|e| format!("Receive metadata from P2P service failed: {e}"))?
-        //     .ok_or("Download [None] metadata")?
-        //     .as_slice()
-        //     .try_into()
-        //     .map_err(|e| format!("Parse metadata failed: {e}"))?;
+        log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id}][{}] with {} chunks",
+            metadata.original_file_name, metadata.number_of_chunks);
 
-        // log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id} | {}] with {} chunks",
-        //     metadata.original_file_name, metadata.number_of_chunks);
-
-        FsHelper::write_file_metadata(&download_path, &metadata.merkle_root)?;
+        FsHelper::write_file_metadata(&download_directory, &metadata.merkle_root)
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Fs write metadata[{file_id}] failed: {e}");
+            })
+            .ok()?;
 
         self.file_store
             .add_downloading_file(DownloadingFileRecord {
-                id,
-                original_file_name: metadata.original_file_name,
-                download_directory: download_path,
-            })?;
+                file_id,
+                original_file_name: metadata.original_file_name.clone(),
+                download_directory,
+            })
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Record downloading file[{file_id}] failed: {e}");
+            })
+            .ok()?;
+
+        Some(metadata)
+    }
+
+    async fn handle_download_one_file(
+        &mut self,
+        file_id: FileId,
+        mut download_path: PathBuf,
+    ) -> Option<()> {
+        download_path.push(hex::encode(file_id.to_array()));
+
+        let metadata = self.download_metadata(file_id, download_path).await?;
 
         /* TODO:
           make file processor a multi-thread service, each thread wait on a mpmc rx(using sync fs call). commands:
@@ -114,22 +159,17 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
           4. remove file from fs if requred
         */
 
-        Ok(())
+        Some(())
     }
 
     async fn handle_command(&mut self, command: DownloadCommand) -> Option<()> {
         match command {
             DownloadCommand::OneFile {
-                id,
-                metadata,
+                file_id,
                 download_path,
             } => {
-                self.handle_download_one_file(id, metadata, download_path)
-                    .await
-                    .map_err(|e| {
-                        log::error!(target: LOG_TARGET, "Start download file[{}] failed: {e}", id.raw());
-                    })
-                    .ok()?;
+                self.handle_download_one_file(file_id, download_path)
+                    .await?;
             }
         }
 

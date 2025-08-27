@@ -20,6 +20,7 @@ use libp2p::{
     swarm::NetworkBehaviour,
     tcp, yamux,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     fs, io, select,
@@ -32,11 +33,12 @@ use super::{
     ServerError, Service,
     fs::{FileProcessResult, FsChunkCommand, FsCommand, FsHelper},
 };
-use crate::file_store::{self, PublishedFileRecord};
+use crate::{
+    FileChunkId,
+    file_store::{self, PublishedFileRecord},
+};
 
 pub mod config;
-mod models;
-pub use models::*;
 
 const LOG_TARGET: &str = "app::p2p";
 const MAX_PARALLEL_DOWNLOAD_CHUNK_NUM: usize = 16;
@@ -61,11 +63,28 @@ pub enum P2pNetworkError {
     Libp2pGossipsubSubscription(#[from] SubscriptionError),
 }
 
+// TODO: improvement:
+// seperate DownloadChunk from P2pCommand,
+// then P2pCommand contains PublishFile and DownloadMetadata
+pub enum P2pCommand {
+    PublishFile(Box<FileProcessResult>),
+    DownloadFile {
+        id: FileChunkId,
+        downloaded_contents_tx: oneshot::Sender<Option<Vec<u8>>>,
+    },
+}
+
 type FileDownloadRequest = FileChunkId;
 type FsReadChannel = (
     mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     mpsc::Receiver<(FileChunkId, Option<Vec<u8>>)>,
 );
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum FileDownloadResponse {
+    Success(Vec<u8>),
+    Error(String),
+}
 
 #[derive(NetworkBehaviour)]
 pub struct P2pNetworkBehaviour {
@@ -78,17 +97,6 @@ pub struct P2pNetworkBehaviour {
     relay_client: relay::client::Behaviour,
     dcutr: dcutr::Behaviour,
     file_download: cbor::Behaviour<FileDownloadRequest, FileDownloadResponse>,
-}
-
-// TODO: improvement:
-// seperate DownloadChunk from P2pCommand,
-// then P2pCommand contains PublishFile and DownloadMetadata
-pub enum P2pCommand {
-    PublishFile(Box<FileProcessResult>),
-    DownloadFile {
-        id: FileChunkId,
-        downloaded_contents_tx: oneshot::Sender<Option<Vec<u8>>>,
-    },
 }
 
 #[derive(Debug)]
@@ -494,7 +502,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         file_store_record: PublishedFileRecord,
         need_store: bool,
     ) {
-        let file_id = file_store_record.id.raw();
+        let file_id = file_store_record.file_id;
         log::info!(target: LOG_TARGET, "Publish processed file[{}][{file_id}] with {} chunks on DHT",
             file_store_record.original_file_name, processed_file.number_of_chunks);
 
@@ -633,12 +641,12 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 .await
                 .map_err(|e| {
                     log::error!(target: LOG_TARGET, "Read metadata file[{}] ID[{}] failed: {e}",
-                        file_store_record.chunks_directory.display(), file_store_record.id.raw());
+                        file_store_record.chunks_directory.display(), file_store_record.file_id);
                 })
                 .and_then(|metadata| {
                     metadata.as_slice().try_into().map_err(|e| {
                         log::error!(target: LOG_TARGET, "Parse metadata of file[{}] failed: {e}",
-                            file_store_record.id.raw());
+                            file_store_record.file_id);
                     })
                 })
                 .ok()?;

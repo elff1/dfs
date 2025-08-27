@@ -6,7 +6,8 @@ use tokio::{select, sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    app::{ServerError, Service, p2p::FileChunkId},
+    FileChunkId, FileId,
+    app::{ServerError, Service},
     file_store,
 };
 
@@ -28,7 +29,7 @@ pub enum FsServiceError {
 
 pub enum FsCommand {
     ReadMetadata {
-        file_id: u64,
+        file_id: FileId,
         read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     },
     // WriteMetadata {
@@ -72,7 +73,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsService<F> {
 
     async fn handle_command_read_metadata(
         &self,
-        file_id: u64,
+        file_id: FileId,
         read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     ) -> bool {
         let chunks_directory = self
