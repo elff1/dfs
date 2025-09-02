@@ -69,7 +69,8 @@ pub enum P2pNetworkError {
 pub enum P2pCommand {
     PublishFile(Box<FileProcessResult>),
     DownloadFile {
-        id: FileChunkId,
+        chunk_id: FileChunkId,
+        // timeout: Option<u64>,
         downloaded_contents_tx: oneshot::Sender<Option<Vec<u8>>>,
     },
 }
@@ -102,6 +103,7 @@ pub struct P2pNetworkBehaviour {
 #[derive(Debug)]
 struct FileDownloadLocalRequestBlock {
     chunk_id: FileChunkId,
+    // timeout: Option<u64>,
     downloaded_contents_tx: Option<oneshot::Sender<Option<Vec<u8>>>>,
     start_timestamp: Instant,
     kad_get_providers_query_id: Option<QueryId>,
@@ -606,10 +608,10 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 );
             }
             P2pCommand::DownloadFile {
-                id,
+                chunk_id,
                 downloaded_contents_tx,
             } => {
-                self.handle_command_download_file(swarm, id, downloaded_contents_tx);
+                self.handle_command_download_file(swarm, chunk_id, downloaded_contents_tx);
             }
         }
     }

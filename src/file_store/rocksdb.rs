@@ -50,10 +50,7 @@ impl RocksDb {
             .ok_or(RocksDbStoreError::ColumnFamilyMissing(cf_name.to_string()))
     }
 
-    fn add_published_file_inner(
-        &self,
-        record: PublishedFileRecord,
-    ) -> Result<(), RocksDbStoreError> {
+    fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), RocksDbStoreError> {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         let key = record.key();
         let value: Vec<u8> = (&record).into();
@@ -62,12 +59,12 @@ impl RocksDb {
         Ok(())
     }
 
-    fn published_file_exists_inner(&self, file_id: FileId) -> Result<bool, RocksDbStoreError> {
+    fn published_file_exists(&self, file_id: FileId) -> Result<bool, RocksDbStoreError> {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self.db.key_may_exist_cf(cf, file_id.to_array()))
     }
 
-    fn get_published_file_inner(
+    fn get_published_file(
         &self,
         file_id: FileId,
     ) -> Result<Option<PublishedFileRecord>, RocksDbStoreError> {
@@ -79,7 +76,7 @@ impl RocksDb {
             .transpose()?)
     }
 
-    fn get_all_published_file_inner(
+    fn get_all_published_files(
         &self,
     ) -> Result<impl Iterator<Item = PublishedFileRecord> + Send, RocksDbStoreError> {
         let cf = self.column_family(PUBLISHED_FILES_COLUMN_FAMILY_NAME)?;
@@ -105,10 +102,7 @@ impl RocksDb {
         )
     }
 
-    fn add_downloading_file_inner(
-        &self,
-        record: DownloadingFileRecord,
-    ) -> Result<(), RocksDbStoreError> {
+    fn add_downloading_file(&self, record: DownloadingFileRecord) -> Result<(), RocksDbStoreError> {
         let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
         let key = record.key();
         let value: Vec<u8> = (&record).into();
@@ -117,12 +111,17 @@ impl RocksDb {
         Ok(())
     }
 
-    fn downloading_file_exists_inner(&self, file_id: FileId) -> Result<bool, RocksDbStoreError> {
+    fn delete_downloading_file(&self, file_id: FileId) -> Result<(), RocksDbStoreError> {
+        let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
+        Ok(self.db.delete_cf(cf, file_id.to_array())?)
+    }
+
+    fn downloading_file_exists(&self, file_id: FileId) -> Result<bool, RocksDbStoreError> {
         let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
         Ok(self.db.key_may_exist_cf(cf, file_id.to_array()))
     }
 
-    fn get_downloading_file_inner(
+    fn get_downloading_file(
         &self,
         file_id: FileId,
     ) -> Result<Option<DownloadingFileRecord>, RocksDbStoreError> {
@@ -134,7 +133,7 @@ impl RocksDb {
             .transpose()?)
     }
 
-    fn get_all_downloading_file_inner(
+    fn get_all_downloading_files(
         &self,
     ) -> Result<impl Iterator<Item = DownloadingFileRecord> + Send, RocksDbStoreError> {
         let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
@@ -164,45 +163,49 @@ impl RocksDb {
 impl Store for RocksDb {
     // published file
     fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError> {
-        Ok(self.add_published_file_inner(record)?)
+        Ok(self.add_published_file(record)?)
     }
 
     fn published_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError> {
-        Ok(self.published_file_exists_inner(file_id)?)
+        Ok(self.published_file_exists(file_id)?)
     }
 
     fn get_published_file(
         &self,
         file_id: FileId,
     ) -> Result<Option<PublishedFileRecord>, FileStoreError> {
-        Ok(self.get_published_file_inner(file_id)?)
+        Ok(self.get_published_file(file_id)?)
     }
 
     fn get_all_published_files(
         &self,
     ) -> Result<impl Iterator<Item = PublishedFileRecord> + Send, FileStoreError> {
-        Ok(self.get_all_published_file_inner()?)
+        Ok(self.get_all_published_files()?)
     }
 
     // downloading file
     fn add_downloading_file(&self, record: DownloadingFileRecord) -> Result<(), FileStoreError> {
-        Ok(self.add_downloading_file_inner(record)?)
+        Ok(self.add_downloading_file(record)?)
+    }
+
+    fn delete_downloading_file(&self, file_id: FileId) -> Result<(), FileStoreError> {
+        Ok(self.delete_downloading_file(file_id)?)
     }
 
     fn downloading_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError> {
-        Ok(self.downloading_file_exists_inner(file_id)?)
+        Ok(self.downloading_file_exists(file_id)?)
     }
 
     fn get_downloading_file(
         &self,
         file_id: FileId,
     ) -> Result<Option<DownloadingFileRecord>, FileStoreError> {
-        Ok(self.get_downloading_file_inner(file_id)?)
+        Ok(self.get_downloading_file(file_id)?)
     }
 
     fn get_all_downloading_files(
         &self,
     ) -> Result<impl Iterator<Item = DownloadingFileRecord> + Send, FileStoreError> {
-        Ok(self.get_all_downloading_file_inner()?)
+        Ok(self.get_all_downloading_files()?)
     }
 }

@@ -47,6 +47,7 @@ pub trait Store {
 
     // downloading file
     fn add_downloading_file(&self, record: DownloadingFileRecord) -> Result<(), FileStoreError>;
+    fn delete_downloading_file(&self, record: FileId) -> Result<(), FileStoreError>;
     fn downloading_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError>;
     fn get_downloading_file(
         &self,
