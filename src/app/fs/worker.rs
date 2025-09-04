@@ -20,7 +20,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
     async fn handle_command_read_chunk(
         &self,
         chunk_id: FileChunkId,
-        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+        contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     ) -> bool {
         let file_id = chunk_id.file_id;
         let chunk_index = chunk_id.chunk_index;
@@ -39,7 +39,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
             })
         });
 
-        read_contents_tx
+        contents_tx
             .send((FileChunkId::new(file_id, chunk_index), chunk.ok()))
             .await
             .map_err(|e| {
@@ -52,10 +52,9 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
         match command {
             FsChunkCommand::Read {
                 chunk_id,
-                read_contents_tx,
+                contents_tx,
             } => {
-                self.handle_command_read_chunk(chunk_id, read_contents_tx)
-                    .await;
+                self.handle_command_read_chunk(chunk_id, contents_tx).await;
             }
         }
 

@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+pub type Hash64 = u64;
+pub type Hash256 = [u8; 32];
+
 #[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct FileId(u64);
+pub struct FileId(Hash64);
 
 impl FileId {
-    pub fn new(hash: u64) -> Self {
+    pub fn new(hash: Hash64) -> Self {
         Self(hash)
     }
 
@@ -18,7 +21,7 @@ impl TryFrom<&[u8]> for FileId {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let value: [u8; 8] = value.try_into().map_err(|_| {})?;
-        Ok(Self(u64::from_be_bytes(value)))
+        Ok(Self(Hash64::from_be_bytes(value)))
     }
 }
 

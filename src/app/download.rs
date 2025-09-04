@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     ServerError, Service,
-    fs::{FileProcessResult, FsHelper},
+    fs::{FileMetadata, FileProcessResult, FsHelper},
     p2p::P2pCommand,
 };
 use crate::{
@@ -65,7 +65,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         &mut self,
         file_id: FileId,
         download_directory: &Path,
-    ) -> Option<Box<FileProcessResult>> {
+    ) -> Option<Box<FileMetadata>> {
         FsHelper::create_directory_async(download_directory, true)
             .await
             .map_err(|e| {
@@ -97,7 +97,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                 None
             })?;
 
-        let metadata: Box<FileProcessResult> = metadata_contents
+        let metadata: Box<FileMetadata> = metadata_contents
             .as_slice()
             .try_into()
             .map_err(|e| log::error!(target: LOG_TARGET, "Parse metadata[{file_id}] failed: {e}"))
@@ -132,7 +132,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         &mut self,
         file_id: FileId,
         download_directory: &Path,
-        metadata: &FileProcessResult,
+        metadata: &FileMetadata,
     ) -> u32 {
         let mut chunk_ids = (1..=metadata.number_of_chunks as usize)
             .map(|chunk_index| FileChunkId::new(file_id, chunk_index))
@@ -236,7 +236,10 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         // TODO: merge chunks
 
         self.p2p_command_tx
-            .send(P2pCommand::PublishFile(metadata))
+            .send(P2pCommand::PublishFile(FileProcessResult::new(
+                metadata,
+                download_path,
+            )))
             .await
             .unwrap_or_else(|e| {
                 log::error!(target: LOG_TARGET,
@@ -279,7 +282,9 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
               3. remove chunks from fs
               4. remove file from fs if requred
 
-              1. fs: adjust metadata(add FileMetadata): remove chunks_directory, add file length
+              1. fs: adjust metadata(add FileMetadata): remove chunks_directory, add file length;
+                    FsCommand distribute into three sub-command: FileProcessCommand, FileMetadataCommand, FileChunkCommand; handled by workers equally;
+                    add FileId in FileMetadata; make FileProcessResult public in FsService only
               2. p2p: add Hash256; add DhtKey(u64): metadata = FileId, chunk = hash(Sha256)
               3. support download folder
             */

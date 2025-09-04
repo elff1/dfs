@@ -55,7 +55,7 @@ impl Dfs for DfsGrpcService {
             })?;
 
         log::info!(target: LOG_TARGET, "File process result: file[{}], root hash[{}]",
-            file_result.original_file_name, hex::encode(file_result.merkle_root.as_ref()));
+            file_result.metadata.original_file_name, hex::encode(file_result.metadata.merkle_root.as_ref()));
 
         self.p2p_command_tx
             .send(P2pCommand::PublishFile(file_result))

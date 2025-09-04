@@ -30,7 +30,7 @@ pub enum FsServiceError {
 pub enum FsCommand {
     ReadMetadata {
         file_id: FileId,
-        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+        contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     },
     // WriteMetadata {
     //     file_id: u64,
@@ -42,7 +42,7 @@ pub enum FsCommand {
 pub enum FsChunkCommand {
     Read {
         chunk_id: FileChunkId,
-        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+        contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     },
     // Write {
     //     chunk_id: FileChunkId,
@@ -74,7 +74,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsService<F> {
     async fn handle_command_read_metadata(
         &self,
         file_id: FileId,
-        read_contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
+        contents_tx: mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     ) -> bool {
         let chunks_directory = self
             .file_store
@@ -94,7 +94,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsService<F> {
                     }).ok()
         };
 
-        read_contents_tx
+        contents_tx
             .send((FileChunkId::new(file_id, 0), metadata))
             .await
             .map_err(|e| {
@@ -107,9 +107,9 @@ impl<F: file_store::Store + Send + Sync + 'static> FsService<F> {
         match command {
             FsCommand::ReadMetadata {
                 file_id,
-                read_contents_tx,
+                contents_tx,
             } => {
-                self.handle_command_read_metadata(file_id, read_contents_tx)
+                self.handle_command_read_metadata(file_id, contents_tx)
                     .await;
             }
         }

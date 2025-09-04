@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use self::config::P2pServiceConfig;
 use super::{
     ServerError, Service,
-    fs::{FileProcessResult, FsChunkCommand, FsCommand, FsHelper},
+    fs::{FileMetadata, FileProcessResult, FsChunkCommand, FsCommand, FsHelper},
 };
 use crate::{
     FileChunkId,
@@ -67,7 +67,7 @@ pub enum P2pNetworkError {
 // seperate DownloadChunk from P2pCommand,
 // then P2pCommand contains PublishFile and DownloadMetadata
 pub enum P2pCommand {
-    PublishFile(Box<FileProcessResult>),
+    PublishFile(FileProcessResult),
     DownloadFile {
         chunk_id: FileChunkId,
         // timeout: Option<u64>,
@@ -76,7 +76,7 @@ pub enum P2pCommand {
 }
 
 type FileDownloadRequest = FileChunkId;
-type FsReadChannel = (
+type FsContentsReturnChannel = (
     mpsc::Sender<(FileChunkId, Option<Vec<u8>>)>,
     mpsc::Receiver<(FileChunkId, Option<Vec<u8>>)>,
 );
@@ -118,7 +118,7 @@ pub struct P2pService<F: file_store::Store + Send + Sync + 'static> {
     // Communication with FS service
     fs_command_tx: mpsc::Sender<FsCommand>,
     fs_chunk_command_tx: async_channel::Sender<FsChunkCommand>,
-    fs_read_channel: FsReadChannel,
+    fs_contents_return_channel: FsContentsReturnChannel,
 
     // Receive commads from other services
     p2p_command_rx: mpsc::Receiver<P2pCommand>,
@@ -141,7 +141,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             file_store,
             fs_command_tx,
             fs_chunk_command_tx,
-            fs_read_channel: mpsc::channel(100),
+            fs_contents_return_channel: mpsc::channel(100),
             p2p_command_rx,
             file_download_local_requests: VecDeque::with_capacity(MAX_PARALLEL_DOWNLOAD_CHUNK_NUM),
             file_download_remote_requests: HashMap::new(),
@@ -404,20 +404,20 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         std::collections::hash_map::Entry::Vacant(vacant_entry) => vacant_entry,
                     };
 
-                    let read_contents_tx = self.fs_read_channel.0.clone();
+                    let contents_tx = self.fs_contents_return_channel.0.clone();
                     let fs_command_has_sent = match chunk_index {
                         0 => self
                             .fs_command_tx
                             .try_send(FsCommand::ReadMetadata {
                                 file_id,
-                                read_contents_tx,
+                                contents_tx,
                             })
                             .is_ok(),
                         _ => self
                             .fs_chunk_command_tx
                             .try_send(FsChunkCommand::Read {
                                 chunk_id,
-                                read_contents_tx,
+                                contents_tx,
                             })
                             .is_ok(),
                     };
@@ -461,7 +461,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         Some(())
     }
 
-    fn handle_file_read_result(
+    fn handle_fs_returned_contents(
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         chunk_id: FileChunkId,
@@ -500,22 +500,22 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
     fn handle_command_publish_file(
         &self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
-        processed_file: &FileProcessResult,
+        metadata: &FileMetadata,
         file_store_record: PublishedFileRecord,
         need_store: bool,
     ) {
         let file_id = file_store_record.file_id;
         log::info!(target: LOG_TARGET, "Publish processed file[{}][{file_id}] with {} chunks on DHT",
-            file_store_record.original_file_name, processed_file.number_of_chunks);
+            file_store_record.original_file_name, metadata.number_of_chunks);
 
-        for chunk_index in 0..=(processed_file.number_of_chunks as usize) {
+        for chunk_index in 0..=(metadata.number_of_chunks as usize) {
             let chunk_id = FileChunkId::new(file_id, chunk_index);
             let kad_key: Vec<u8> = (&chunk_id).into();
             let kad_record = Record::new(
                 kad_key,
                 match chunk_index {
-                    0 => processed_file.merkle_root.to_vec(),
-                    _ => processed_file.merkle_leaves[chunk_index].to_vec(),
+                    0 => metadata.merkle_root.to_vec(),
+                    _ => metadata.merkle_leaves[chunk_index].to_vec(),
                 },
             );
             let kad_key = kad_record.key.clone();
@@ -599,10 +599,10 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
     fn handle_command(&mut self, swarm: &mut Swarm<P2pNetworkBehaviour>, command: P2pCommand) {
         match command {
             P2pCommand::PublishFile(file_process_result) => {
-                let file_store_record: PublishedFileRecord = file_process_result.as_ref().into();
+                let file_store_record: PublishedFileRecord = (&file_process_result).into();
                 self.handle_command_publish_file(
                     swarm,
-                    &file_process_result,
+                    &file_process_result.metadata,
                     file_store_record,
                     true,
                 );
@@ -638,7 +638,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         file_store_record: PublishedFileRecord,
     ) -> Option<()> {
-        let metadata: Box<FileProcessResult> =
+        let metadata: Box<FileMetadata> =
             FsHelper::read_file_metadata_async(&file_store_record.chunks_directory)
                 .await
                 .map_err(|e| {
@@ -719,9 +719,9 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     },
                     _ => log::debug!(target: LOG_TARGET, "Unhandled event: {event:?}"),
                 },
-                file_read_result = self.fs_read_channel.1.recv() => {
-                    if let Some((chunk_id, contents)) = file_read_result {
-                        self.handle_file_read_result(&mut swarm, chunk_id, contents);
+                fs_returned_contents = self.fs_contents_return_channel.1.recv() => {
+                    if let Some((chunk_id, contents)) = fs_returned_contents {
+                        self.handle_fs_returned_contents(&mut swarm, chunk_id, contents);
                     }
                 },
                 command = self.p2p_command_rx.recv(),

@@ -13,35 +13,35 @@ use tokio::{
 };
 
 use super::FsHelper;
-use crate::FileId;
+use crate::{FileId, Hash256};
 
 const LOG_TARGET: &str = "app::fs::processor";
 /// chunk size 1MB
 const CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FileProcessResult {
+pub struct FileMetadata {
     pub original_file_name: String,
+    pub file_length: u64,
     pub number_of_chunks: u32,
-    pub chunks_directory: PathBuf,
-    pub merkle_root: [u8; 32],
-    pub merkle_leaves: Vec<[u8; 32]>,
+    pub merkle_root: Hash256,
+    pub merkle_leaves: Vec<Hash256>,
     pub public: bool,
 }
 
-impl FileProcessResult {
+impl FileMetadata {
     pub fn new(
         original_file_name: String,
+        file_length: u64,
         number_of_chunks: u32,
-        chunks_directory: PathBuf,
-        merkle_root: [u8; 32],
-        merkle_leaves: Vec<[u8; 32]>,
+        merkle_root: Hash256,
+        merkle_leaves: Vec<Hash256>,
         public: bool,
     ) -> Box<Self> {
         Box::new(Self {
             original_file_name,
+            file_length,
             number_of_chunks,
-            chunks_directory,
             merkle_root,
             merkle_leaves,
             public,
@@ -55,7 +55,7 @@ impl FileProcessResult {
     }
 }
 
-impl Hash for FileProcessResult {
+impl Hash for FileMetadata {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.original_file_name.hash(state);
         self.number_of_chunks.hash(state);
@@ -64,7 +64,7 @@ impl Hash for FileProcessResult {
     }
 }
 
-impl TryFrom<&[u8]> for Box<FileProcessResult> {
+impl TryFrom<&[u8]> for Box<FileMetadata> {
     type Error = serde_cbor::Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -72,13 +72,25 @@ impl TryFrom<&[u8]> for Box<FileProcessResult> {
     }
 }
 
+#[derive(Debug)]
+pub struct FileProcessResult {
+    pub metadata: Box<FileMetadata>,
+    pub chunks_directory: PathBuf,
+}
+
+impl FileProcessResult {
+    pub fn new(metadata: Box<FileMetadata>, chunks_directory: PathBuf) -> Self {
+        Self {
+            metadata,
+            chunks_directory,
+        }
+    }
+}
+
 pub struct FileProcessor();
 
 impl FileProcessor {
-    pub async fn process_file(
-        file_path: String,
-        public: bool,
-    ) -> io::Result<Box<FileProcessResult>> {
+    pub async fn process_file(file_path: String, public: bool) -> io::Result<FileProcessResult> {
         let file = PathBuf::from(file_path);
 
         log::debug!(target: LOG_TARGET, "Start publish: {}", file.display());
@@ -91,7 +103,7 @@ impl FileProcessor {
     }
 }
 
-async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<FileProcessResult>> {
+async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()
@@ -108,6 +120,7 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
     log::info!(target: LOG_TARGET, "Chunks directory: {}", chunks_directory.display());
 
     let mut file = File::open(file_path).await?;
+    let mut file_length = 0;
     let mut chunk_index = 0;
     let mut merkle_leaves = vec![];
 
@@ -133,6 +146,7 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
             break;
         }
 
+        file_length += buf_offset as u64;
         chunk_index += 1;
         merkle_leaves.push(Sha256::hash(&buf[..buf_offset]));
 
@@ -146,15 +160,18 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<Box<File
         .ok_or(io::Error::other("can not get Merkle root"))?;
 
     let result = FileProcessResult::new(
-        file_name,
-        chunk_index,
+        FileMetadata::new(
+            file_name,
+            file_length,
+            chunk_index,
+            merkle_root,
+            merkle_leaves,
+            public,
+        ),
         chunks_directory,
-        merkle_root,
-        merkle_leaves,
-        public,
     );
 
-    FsHelper::serde_write_file_metadata(&result.chunks_directory, &result)?;
+    FsHelper::serde_write_file_metadata(&result.chunks_directory, &result.metadata)?;
 
     Ok(result)
 }

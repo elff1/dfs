@@ -1,6 +1,6 @@
 use std::{io, path::Path};
 
-use super::FileProcessResult;
+use super::FileMetadata;
 
 const FILE_METADATA_NAME: &str = "metadata.cbor";
 const FILE_CHUNK_NAME: &str = "chunk_";
@@ -41,7 +41,7 @@ impl FsHelper {
 
     pub fn serde_write_file_metadata<P: AsRef<Path>>(
         chunks_directory: P,
-        metadata: &FileProcessResult,
+        metadata: &FileMetadata,
     ) -> io::Result<()> {
         let cbor_file = std::fs::File::create(chunks_directory.as_ref().join(FILE_METADATA_NAME))?;
         serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;

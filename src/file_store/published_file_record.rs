@@ -21,10 +21,10 @@ impl PublishedFileRecord {
 impl From<FileProcessResult> for PublishedFileRecord {
     fn from(result: FileProcessResult) -> Self {
         Self {
-            file_id: result.hash_sha256(),
-            original_file_name: result.original_file_name,
+            file_id: result.metadata.hash_sha256(),
+            original_file_name: result.metadata.original_file_name,
             chunks_directory: result.chunks_directory,
-            public: result.public,
+            public: result.metadata.public,
         }
     }
 }
@@ -32,10 +32,10 @@ impl From<FileProcessResult> for PublishedFileRecord {
 impl From<&FileProcessResult> for PublishedFileRecord {
     fn from(result: &FileProcessResult) -> Self {
         Self {
-            file_id: result.hash_sha256(),
-            original_file_name: result.original_file_name.clone(),
+            file_id: result.metadata.hash_sha256(),
+            original_file_name: result.metadata.original_file_name.clone(),
             chunks_directory: result.chunks_directory.clone(),
-            public: result.public,
+            public: result.metadata.public,
         }
     }
 }
