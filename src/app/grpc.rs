@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use self::{api::DfsGrpcService, dfs_grpc::dfs_server::DfsServer};
-use super::{ServerError, Service, download::DownloadCommand, p2p::P2pCommand};
+use super::{ServerError, Service, download::DownloadCommand, fs::FsCommand, p2p::P2pCommand};
 
 mod dfs_grpc {
     tonic::include_proto!("dfs_grpc");
@@ -24,6 +24,7 @@ pub enum GrpcServiceError {
 
 pub struct GrpcService {
     port: u16,
+    fs_command_tx: mpsc::Sender<FsCommand>,
     p2p_command_tx: mpsc::Sender<P2pCommand>,
     download_command_tx: mpsc::Sender<DownloadCommand>,
 }
@@ -31,11 +32,13 @@ pub struct GrpcService {
 impl GrpcService {
     pub fn new(
         port: u16,
+        fs_command_tx: mpsc::Sender<FsCommand>,
         p2p_command_tx: mpsc::Sender<P2pCommand>,
         download_command_tx: mpsc::Sender<DownloadCommand>,
     ) -> Self {
         GrpcService {
             port,
+            fs_command_tx,
             p2p_command_tx,
             download_command_tx,
         }
@@ -48,6 +51,7 @@ impl GrpcService {
 
         Server::builder()
             .add_service(DfsServer::new(DfsGrpcService::new(
+                self.fs_command_tx,
                 self.p2p_command_tx,
                 self.download_command_tx,
             )))

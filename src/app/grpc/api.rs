@@ -1,4 +1,4 @@
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use super::dfs_grpc::{
@@ -6,23 +6,26 @@ use super::dfs_grpc::{
 };
 use crate::{
     FileId,
-    app::{download::DownloadCommand, fs::FileProcessor, p2p::P2pCommand},
+    app::{download::DownloadCommand, fs::FsCommand, p2p::P2pCommand},
 };
 
 const LOG_TARGET: &str = "app::grpc::api";
 
 #[derive(Debug)]
 pub(super) struct DfsGrpcService {
+    fs_command_tx: mpsc::Sender<FsCommand>,
     p2p_command_tx: mpsc::Sender<P2pCommand>,
     download_command_tx: mpsc::Sender<DownloadCommand>,
 }
 
 impl DfsGrpcService {
     pub(super) fn new(
+        fs_command_tx: mpsc::Sender<FsCommand>,
         p2p_command_tx: mpsc::Sender<P2pCommand>,
         download_command_tx: mpsc::Sender<DownloadCommand>,
     ) -> Self {
         DfsGrpcService {
+            fs_command_tx,
             p2p_command_tx,
             download_command_tx,
         }
@@ -36,39 +39,49 @@ impl Dfs for DfsGrpcService {
         request: Request<PublishFileRequest>,
     ) -> Result<Response<PublishFileResponse>, Status> {
         let request_str = format!("{request:?}");
-        log::info!(target: LOG_TARGET, "Got publish request: {request_str}");
-
         let PublishFileRequest { file_path, public } = request.into_inner();
-        let file_result = FileProcessor::process_file(file_path, public)
+        log::info!(target: LOG_TARGET, "Get publish file request: {request_str}");
+
+        let (tx, rx) = oneshot::channel();
+        self.fs_command_tx
+            .send(FsCommand::ProcessFileBeforePublish {
+                file_path: file_path.clone(),
+                public,
+                metadata_tx: tx,
+            })
             .await
             .map_err(|e| {
-                let err_str = format!("Process file [{request_str}] failed: {e}");
+                let err_str = format!("Send command to FS service failed: {e}");
                 log::error!(target: LOG_TARGET, "{err_str}");
-
-                use std::io::ErrorKind as K;
-                match e.kind() {
-                    K::NotFound => Status::not_found(request_str),
-                    K::PermissionDenied => Status::permission_denied(request_str),
-                    K::InvalidFilename => Status::invalid_argument(request_str),
-                    _ => Status::internal(err_str),
-                }
+                Status::internal(err_str)
             })?;
 
-        log::info!(target: LOG_TARGET, "File process result: file[{}], root hash[{}]",
-            file_result.metadata.original_file_name, hex::encode(file_result.metadata.merkle_root.as_ref()));
-
-        self.p2p_command_tx
-            .send(P2pCommand::PublishFile(file_result))
+        let metadata = rx
             .await
             .map_err(|e| {
-                let err_str = format!("Send file process result to P2P service failed: {e}");
+                let err_str =
+                    format!("Receive metadata of file[{file_path}] from FS service failed: {e}");
+                log::error!(target: LOG_TARGET, "{err_str}");
+                Status::internal(err_str)
+            })?
+            .ok_or_else(|| {
+                let err_str = format!("Process file[{file_path}] before publish failed");
+                log::error!(target: LOG_TARGET, "{err_str}");
+                Status::internal(err_str)
+            })?;
+
+        self.p2p_command_tx
+            .send(P2pCommand::PublishFile(metadata))
+            .await
+            .map_err(|e| {
+                let err_str = format!("Send publish file command to P2P service failed: {e}");
                 log::error!(target: LOG_TARGET, "{err_str}");
                 Status::internal(err_str)
             })?;
 
         Ok(Response::new(PublishFileResponse {
             success: true,
-            error: "".to_string(),
+            error: String::default(),
         }))
     }
 
@@ -96,7 +109,7 @@ impl Dfs for DfsGrpcService {
 
         Ok(Response::new(DownloadResponse {
             success: true,
-            error: "".to_string(),
+            error: String::default(),
         }))
     }
 }

@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{FileId, app::fs::FileProcessResult};
+use crate::FileId;
+
+const LOG_TARGET: &str = "file_store::published_file_record";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublishedFileRecord {
@@ -18,33 +20,11 @@ impl PublishedFileRecord {
     }
 }
 
-impl From<FileProcessResult> for PublishedFileRecord {
-    fn from(result: FileProcessResult) -> Self {
-        Self {
-            file_id: result.metadata.hash_sha256(),
-            original_file_name: result.metadata.original_file_name,
-            chunks_directory: result.chunks_directory,
-            public: result.metadata.public,
-        }
-    }
-}
-
-impl From<&FileProcessResult> for PublishedFileRecord {
-    fn from(result: &FileProcessResult) -> Self {
-        Self {
-            file_id: result.metadata.hash_sha256(),
-            original_file_name: result.metadata.original_file_name.clone(),
-            chunks_directory: result.chunks_directory.clone(),
-            public: result.metadata.public,
-        }
-    }
-}
-
 impl From<&PublishedFileRecord> for Vec<u8> {
     fn from(value: &PublishedFileRecord) -> Self {
         serde_cbor::to_vec(value)
             .map_err(|e| {
-                log::error!("serde_cbor::to_vec(PublishedFileRecord[{value:?}]) failed: {e}");
+                log::error!(target: LOG_TARGET, "serde_cbor::to_vec(PublishedFileRecord[{value:?}]) failed: {e}");
             })
             .unwrap()
     }

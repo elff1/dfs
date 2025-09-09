@@ -16,11 +16,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     ServerError, Service,
-    fs::{FileMetadata, FileProcessResult, FsHelper},
+    fs::{FsCommand, FsHelper},
     p2p::P2pCommand,
 };
 use crate::{
-    FileChunkId, FileId,
+    FileChunkId, FileId, FileMetadata,
     file_store::{self, DownloadingFileRecord},
 };
 
@@ -44,6 +44,7 @@ pub enum DownloadCommand {
 #[derive(Debug)]
 pub struct DownloadService<F: file_store::Store + Send + Sync + 'static> {
     file_store: Arc<F>,
+    fs_command_tx: mpsc::Sender<FsCommand>,
     p2p_command_tx: mpsc::Sender<P2pCommand>,
     download_command_rx: mpsc::Receiver<DownloadCommand>,
 }
@@ -51,11 +52,13 @@ pub struct DownloadService<F: file_store::Store + Send + Sync + 'static> {
 impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
     pub fn new(
         file_store: Arc<F>,
+        fs_command_tx: mpsc::Sender<FsCommand>,
         p2p_command_tx: mpsc::Sender<P2pCommand>,
         download_command_rx: mpsc::Receiver<DownloadCommand>,
     ) -> Self {
         Self {
             file_store,
+            fs_command_tx,
             p2p_command_tx,
             download_command_rx,
         }
@@ -221,7 +224,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         file_id: FileId,
         mut download_path: PathBuf,
     ) -> Option<()> {
-        download_path.push(hex::encode(file_id.to_array()));
+        download_path.push(file_id.to_string());
 
         let metadata = self.download_metadata(file_id, &download_path).await?;
 
@@ -234,20 +237,31 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         }
 
         // TODO: merge chunks
+        let (tx, rx) = oneshot::channel();
+        self.fs_command_tx
+            .send(FsCommand::ProcessFileAfterDownload {
+                chunks_directory: download_path,
+                file_id,
+                original_file_name: metadata.original_file_name.clone(),
+                number_of_chunks: downloaded_chunks_num,
+                public: metadata.public,
+                process_result_tx: tx,
+            })
+            .await
+            .ok()?;
+
+        let _result = rx.await.map_err(|_| ()).ok()?;
+
+        self.file_store.delete_downloading_file(file_id).unwrap_or_else(|e| {
+                log::error!(target: LOG_TARGET, "Delete downloading file from file store failed: {e}")
+            });
 
         self.p2p_command_tx
-            .send(P2pCommand::PublishFile(FileProcessResult::new(
-                metadata,
-                download_path,
-            )))
+            .send(P2pCommand::PublishFile(metadata))
             .await
             .unwrap_or_else(|e| {
                 log::error!(target: LOG_TARGET,
                     "Send publish file[{file_id}] request to P2P service failed: {e}");
-            });
-
-        self.file_store.delete_downloading_file(file_id).unwrap_or_else(|e| {
-                log::error!(target: LOG_TARGET, "Delete downloading file from file store failed: {e}")
             });
 
         /* TODO:
@@ -274,7 +288,8 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         --->  5. after all chunks downloaded, merge together
               6. send command to P2P, publish file
               7. move file id from Downloading table to pubished table
-              8. continue unfinished download work after restart
+              8. if any failiure, try again one more time
+              9. continue unfinished download work after restart; delete downloading record if file is downloaded
 
               remove file from dfs system
               1. remove record from DHT

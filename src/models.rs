@@ -1,3 +1,6 @@
+use std::hash::{Hash, Hasher};
+
+use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 
 pub type Hash64 = u64;
@@ -74,5 +77,64 @@ impl TryFrom<&[u8]> for FileChunkId {
 impl std::fmt::Display for FileChunkId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("{}/{}", self.file_id.0, self.chunk_index))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileMetadata {
+    pub file_id: FileId,
+    pub original_file_name: String,
+    pub file_length: u64,
+    pub number_of_chunks: u32,
+    pub merkle_root: Hash256,
+    pub merkle_leaves: Vec<Hash256>,
+    pub public: bool,
+}
+
+impl FileMetadata {
+    pub fn new(
+        original_file_name: String,
+        file_length: u64,
+        number_of_chunks: u32,
+        merkle_root: Hash256,
+        merkle_leaves: Vec<Hash256>,
+        public: bool,
+    ) -> Box<Self> {
+        let mut metadata = Box::new(Self {
+            file_id: FileId::default(),
+            original_file_name,
+            file_length,
+            number_of_chunks,
+            merkle_root,
+            merkle_leaves,
+            public,
+        });
+
+        metadata.file_id = metadata.hash_sha256();
+
+        metadata
+    }
+
+    fn hash_sha256(&self) -> FileId {
+        let mut hasher = Sha256Hasher::default();
+        self.hash(&mut hasher);
+        FileId::new(hasher.finish())
+    }
+}
+
+impl Hash for FileMetadata {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.original_file_name.hash(state);
+        self.number_of_chunks.hash(state);
+        self.merkle_root.hash(state);
+        self.public.hash(state);
+    }
+}
+
+impl TryFrom<&[u8]> for Box<FileMetadata> {
+    type Error = serde_cbor::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        serde_cbor::from_slice(value)
     }
 }

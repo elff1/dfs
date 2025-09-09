@@ -1,125 +1,69 @@
 use std::{
-    hash::{Hash, Hasher as _},
+    fs,
+    io::{self, Read},
     mem::MaybeUninit,
     path::{Path, PathBuf},
 };
 
 use rs_merkle::{Hasher, MerkleTree, algorithms::Sha256};
-use rs_sha256::Sha256Hasher;
-use serde::{Deserialize, Serialize};
-use tokio::{
-    fs::{self, File},
-    io::{self, AsyncReadExt},
-};
 
 use super::FsHelper;
-use crate::{FileId, Hash256};
+use crate::FileMetadata;
 
 const LOG_TARGET: &str = "app::fs::processor";
 /// chunk size 1MB
 const CHUNK_SIZE: usize = 1024 * 1024;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FileMetadata {
-    pub original_file_name: String,
-    pub file_length: u64,
-    pub number_of_chunks: u32,
-    pub merkle_root: Hash256,
-    pub merkle_leaves: Vec<Hash256>,
-    pub public: bool,
-}
-
-impl FileMetadata {
-    pub fn new(
-        original_file_name: String,
-        file_length: u64,
-        number_of_chunks: u32,
-        merkle_root: Hash256,
-        merkle_leaves: Vec<Hash256>,
-        public: bool,
-    ) -> Box<Self> {
-        Box::new(Self {
-            original_file_name,
-            file_length,
-            number_of_chunks,
-            merkle_root,
-            merkle_leaves,
-            public,
-        })
-    }
-
-    pub fn hash_sha256(&self) -> FileId {
-        let mut hasher = Sha256Hasher::default();
-        self.hash(&mut hasher);
-        FileId::new(hasher.finish())
-    }
-}
-
-impl Hash for FileMetadata {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.original_file_name.hash(state);
-        self.number_of_chunks.hash(state);
-        self.merkle_root.hash(state);
-        self.public.hash(state);
-    }
-}
-
-impl TryFrom<&[u8]> for Box<FileMetadata> {
-    type Error = serde_cbor::Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        serde_cbor::from_slice(value)
-    }
-}
-
 #[derive(Debug)]
-pub struct FileProcessResult {
+pub(super) struct FileProcessResult {
     pub metadata: Box<FileMetadata>,
     pub chunks_directory: PathBuf,
 }
 
-impl FileProcessResult {
-    pub fn new(metadata: Box<FileMetadata>, chunks_directory: PathBuf) -> Self {
-        Self {
-            metadata,
-            chunks_directory,
-        }
-    }
-}
-
-pub struct FileProcessor();
+pub(super) struct FileProcessor();
 
 impl FileProcessor {
-    pub async fn process_file(file_path: String, public: bool) -> io::Result<FileProcessResult> {
-        let file = PathBuf::from(file_path);
+    pub fn process_file<P: AsRef<Path>>(
+        file_path: P,
+        public: bool,
+    ) -> io::Result<FileProcessResult> {
+        let file_path = file_path.as_ref();
+        let file_path_display = file_path.display();
 
-        log::debug!(target: LOG_TARGET, "Start publish: {}", file.display());
+        log::info!(target: LOG_TARGET, "Start process file[{file_path_display}] before publish");
 
-        if fs::metadata(&file).await?.is_dir() {
+        let process_result = if fs::metadata(file_path)?.is_dir() {
             todo!();
         } else {
-            process_one_file(&file, public).await
-        }
+            process_one_file(file_path, public)?
+        };
+
+        log::info!(target: LOG_TARGET,
+            "Finish process file[{file_path_display}] before publish: file_id[{}]",
+            process_result.metadata.file_id
+        );
+
+        Ok(process_result)
     }
 }
 
-async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
+fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .ok_or(io::Error::new(
-            std::io::ErrorKind::InvalidFilename,
+            io::ErrorKind::InvalidFilename,
             file_path.to_string_lossy(),
         ))?;
     let mut chunks_directory = components.as_path().to_path_buf();
     chunks_directory.push(format!("chunks_{}", file_name.replace(".", "_")));
     // Do not delete the directory
-    FsHelper::create_directory_async(&chunks_directory, false).await?;
+    FsHelper::create_directory(&chunks_directory, false)?;
 
     log::info!(target: LOG_TARGET, "Chunks directory: {}", chunks_directory.display());
 
-    let mut file = File::open(file_path).await?;
+    let mut file = fs::File::open(file_path)?;
     let mut file_length = 0;
     let mut chunk_index = 0;
     let mut merkle_leaves = vec![];
@@ -135,7 +79,7 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProc
     let mut buf_offset = 0;
 
     loop {
-        let read_len = file.read(&mut buf[buf_offset..]).await?;
+        let read_len = file.read(&mut buf[buf_offset..])?;
 
         if read_len > 0 {
             buf_offset += read_len;
@@ -159,8 +103,8 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProc
         .root()
         .ok_or(io::Error::other("can not get Merkle root"))?;
 
-    let result = FileProcessResult::new(
-        FileMetadata::new(
+    let result = FileProcessResult {
+        metadata: FileMetadata::new(
             file_name,
             file_length,
             chunk_index,
@@ -169,7 +113,7 @@ async fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProc
             public,
         ),
         chunks_directory,
-    );
+    };
 
     FsHelper::serde_write_file_metadata(&result.chunks_directory, &result.metadata)?;
 

@@ -31,10 +31,10 @@ use tokio_util::sync::CancellationToken;
 use self::config::P2pServiceConfig;
 use super::{
     ServerError, Service,
-    fs::{FileMetadata, FileProcessResult, FsChunkCommand, FsCommand, FsHelper},
+    fs::{FsCommand, FsHelper},
 };
 use crate::{
-    FileChunkId,
+    FileChunkId, FileMetadata,
     file_store::{self, PublishedFileRecord},
 };
 
@@ -67,7 +67,7 @@ pub enum P2pNetworkError {
 // seperate DownloadChunk from P2pCommand,
 // then P2pCommand contains PublishFile and DownloadMetadata
 pub enum P2pCommand {
-    PublishFile(FileProcessResult),
+    PublishFile(Box<FileMetadata>),
     DownloadFile {
         chunk_id: FileChunkId,
         // timeout: Option<u64>,
@@ -117,7 +117,6 @@ pub struct P2pService<F: file_store::Store + Send + Sync + 'static> {
 
     // Communication with FS service
     fs_command_tx: mpsc::Sender<FsCommand>,
-    fs_chunk_command_tx: async_channel::Sender<FsChunkCommand>,
     fs_contents_return_channel: FsContentsReturnChannel,
 
     // Receive commads from other services
@@ -133,14 +132,12 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         config: P2pServiceConfig,
         file_store: Arc<F>,
         fs_command_tx: mpsc::Sender<FsCommand>,
-        fs_chunk_command_tx: async_channel::Sender<FsChunkCommand>,
         p2p_command_rx: mpsc::Receiver<P2pCommand>,
     ) -> Self {
         Self {
             config,
             file_store,
             fs_command_tx,
-            fs_chunk_command_tx,
             fs_contents_return_channel: mpsc::channel(100),
             p2p_command_rx,
             file_download_local_requests: VecDeque::with_capacity(MAX_PARALLEL_DOWNLOAD_CHUNK_NUM),
@@ -414,8 +411,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                             })
                             .is_ok(),
                         _ => self
-                            .fs_chunk_command_tx
-                            .try_send(FsChunkCommand::Read {
+                            .fs_command_tx
+                            .try_send(FsCommand::ReadChunk {
                                 chunk_id,
                                 contents_tx,
                             })
@@ -501,12 +498,10 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         &self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         metadata: &FileMetadata,
-        file_store_record: PublishedFileRecord,
-        need_store: bool,
     ) {
-        let file_id = file_store_record.file_id;
+        let file_id = metadata.file_id;
         log::info!(target: LOG_TARGET, "Publish processed file[{}][{file_id}] with {} chunks on DHT",
-            file_store_record.original_file_name, metadata.number_of_chunks);
+            metadata.original_file_name, metadata.number_of_chunks);
 
         for chunk_index in 0..=(metadata.number_of_chunks as usize) {
             let chunk_id = FileChunkId::new(file_id, chunk_index);
@@ -532,12 +527,6 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 .start_providing(kad_key)
                 .map_err(|e| log::error!(target: LOG_TARGET, "Provide new record[{chunk_id}] to DHT failed: {e}"))
                 .ok();
-        }
-
-        if need_store {
-            self.file_store.add_published_file(file_store_record).unwrap_or_else(|e| {
-                log::error!(target: LOG_TARGET, "Add new published file to file store failed: {e}")
-            });
         }
     }
 
@@ -598,14 +587,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
 
     fn handle_command(&mut self, swarm: &mut Swarm<P2pNetworkBehaviour>, command: P2pCommand) {
         match command {
-            P2pCommand::PublishFile(file_process_result) => {
-                let file_store_record: PublishedFileRecord = (&file_process_result).into();
-                self.handle_command_publish_file(
-                    swarm,
-                    &file_process_result.metadata,
-                    file_store_record,
-                    true,
-                );
+            P2pCommand::PublishFile(metadata) => {
+                self.handle_command_publish_file(swarm, &metadata);
             }
             P2pCommand::DownloadFile {
                 chunk_id,
@@ -653,7 +636,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 })
                 .ok()?;
 
-        self.handle_command_publish_file(swarm, &metadata, file_store_record, false);
+        self.handle_command_publish_file(swarm, &metadata);
 
         Some(())
     }
@@ -762,14 +745,11 @@ impl<F: file_store::Store + Send + Sync + 'static> Service for P2pService<F> {
 impl Drop for FileDownloadLocalRequestBlock {
     fn drop(&mut self) {
         self.downloaded_contents_tx.take().map(|tx| {
-            log::warn!(target: LOG_TARGET,
-                "Download chunk[{}] timeout or failed, oneshot send None",
-                self.chunk_id
-            );
+            log::warn!(target: LOG_TARGET, "Download chunk[{}] timeout or failed, send None as response", self.chunk_id);
 
             // send empty content if download timeout or failed
             tx.send(None).map_err(|_| {
-                log::error!(target: LOG_TARGET, "Send response of download chunk[{}] failed", self.chunk_id)
+                log::error!(target: LOG_TARGET, "Send response of download chunk[{}] failed", self.chunk_id);
             })
         });
     }

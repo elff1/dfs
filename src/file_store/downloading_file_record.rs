@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::FileId;
 
+const LOG_TARGET: &str = "file_store::downloading_file_record";
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadingFileRecord {
     pub file_id: FileId,
@@ -21,7 +23,7 @@ impl From<&DownloadingFileRecord> for Vec<u8> {
     fn from(value: &DownloadingFileRecord) -> Self {
         serde_cbor::to_vec(value)
             .map_err(|e| {
-                log::error!("serde_cbor::to_vec(DownloadingFileRecord[{value:?}]) failed: {e}");
+                log::error!(target: LOG_TARGET, "serde_cbor::to_vec(DownloadingFileRecord[{value:?}]) failed: {e}");
             })
             .unwrap()
     }

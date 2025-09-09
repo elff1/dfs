@@ -1,6 +1,6 @@
-use std::{io, path::Path};
+use std::{borrow::Cow, fs, io, path::Path};
 
-use super::FileMetadata;
+use crate::FileMetadata;
 
 const FILE_METADATA_NAME: &str = "metadata.cbor";
 const FILE_CHUNK_NAME: &str = "chunk_";
@@ -19,11 +19,13 @@ impl FsHelper {
         tokio::fs::create_dir_all(directory).await
     }
 
-    // pub fn create_directory<P: AsRef<Path>>(directory: P) -> io::Result<()> {
-    //     let directory = directory.as_ref();
-    //     let _ = std::fs::remove_dir_all(directory);
-    //     std::fs::create_dir_all(directory)
-    // }
+    pub fn create_directory<P: AsRef<Path>>(directory: P, delete_first: bool) -> io::Result<()> {
+        let directory = directory.as_ref();
+        if delete_first {
+            let _ = fs::remove_dir_all(directory);
+        }
+        fs::create_dir_all(directory)
+    }
 
     pub async fn read_file_metadata_async<P: AsRef<Path>>(
         chunks_directory: P,
@@ -36,28 +38,29 @@ impl FsHelper {
         P: AsRef<Path>,
         C: AsRef<[u8]>,
     {
-        std::fs::write(chunks_directory.as_ref().join(FILE_METADATA_NAME), contents)
+        fs::write(chunks_directory.as_ref().join(FILE_METADATA_NAME), contents)
     }
 
     pub fn serde_write_file_metadata<P: AsRef<Path>>(
         chunks_directory: P,
         metadata: &FileMetadata,
     ) -> io::Result<()> {
-        let cbor_file = std::fs::File::create(chunks_directory.as_ref().join(FILE_METADATA_NAME))?;
+        let cbor_file = fs::File::create(chunks_directory.as_ref().join(FILE_METADATA_NAME))?;
         serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;
 
         Ok(())
     }
 
+    /// 0: metadata, 1..n: chunks
     pub fn read_file_chunk<P: AsRef<Path>>(
         chunks_directory: P,
         chunk_index: usize,
     ) -> io::Result<Vec<u8>> {
-        std::fs::read(
-            chunks_directory
-                .as_ref()
-                .join(format!("{FILE_CHUNK_NAME}{chunk_index}")),
-        )
+        let file_name = match chunk_index {
+            0 => Cow::Borrowed(FILE_METADATA_NAME),
+            _ => Cow::Owned(format!("{FILE_CHUNK_NAME}{chunk_index}")),
+        };
+        fs::read(chunks_directory.as_ref().join(file_name.as_ref()))
     }
 
     pub fn write_file_chunk<P, C>(
@@ -69,7 +72,7 @@ impl FsHelper {
         P: AsRef<Path>,
         C: AsRef<[u8]>,
     {
-        std::fs::write(
+        fs::write(
             chunks_directory
                 .as_ref()
                 .join(format!("{FILE_CHUNK_NAME}{chunk_index}")),
