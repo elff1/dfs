@@ -81,6 +81,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         self.p2p_command_tx
             .send(P2pCommand::DownloadFile {
                 chunk_id: FileChunkId::new(file_id, 0),
+                chunk_hash: Default::default(),
                 downloaded_contents_tx: tx,
             })
             .await
@@ -153,6 +154,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                         .p2p_command_tx
                         .send(P2pCommand::DownloadFile {
                             chunk_id: *chunk_id,
+                            chunk_hash: metadata.chunk_hashes[chunk_id.chunk_index],
                             downloaded_contents_tx: tx,
                         })
                         .await;
@@ -170,7 +172,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                         }
                     }
                 } => {
-                    let chunk_hash = metadata.merkle_leaves[chunk_id.chunk_index];
+                    let chunk_merkle_hash = metadata.merkle_leaves[chunk_id.chunk_index];
                     let download_directory = download_directory.to_path_buf();
 
                     download_set.spawn(async move {
@@ -186,7 +188,7 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                             Ok(chunk) => chunk,
                         }.ok_or(chunk_id)?;
 
-                        if Sha256::hash(&chunk) != chunk_hash {
+                        if Sha256::hash(&chunk) != chunk_merkle_hash {
                             log::error!(target: LOG_TARGET, "Check chunk[{chunk_id}] hash failed");
                             return Err(chunk_id);
                         }

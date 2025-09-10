@@ -3,14 +3,12 @@ use std::hash::{Hash, Hasher};
 use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 
-pub type Hash64 = u64;
+#[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct Hash64(u64);
 pub type Hash256 = [u8; 32];
 
-#[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub struct FileId(Hash64);
-
-impl FileId {
-    pub fn new(hash: Hash64) -> Self {
+impl Hash64 {
+    pub fn new(hash: u64) -> Self {
         Self(hash)
     }
 
@@ -19,26 +17,36 @@ impl FileId {
     }
 }
 
-impl TryFrom<&[u8]> for FileId {
+impl<T: Hash> From<&T> for Hash64 {
+    fn from(value: &T) -> Self {
+        let mut hasher = Sha256Hasher::default();
+        value.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+}
+
+impl TryFrom<&[u8]> for Hash64 {
     type Error = ();
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let value: [u8; 8] = value.try_into().map_err(|_| {})?;
-        Ok(Self(Hash64::from_be_bytes(value)))
+        Ok(Self(u64::from_be_bytes(value)))
     }
 }
 
-impl From<FileId> for Vec<u8> {
-    fn from(value: FileId) -> Self {
+impl From<Hash64> for Vec<u8> {
+    fn from(value: Hash64) -> Self {
         value.to_array().to_vec()
     }
 }
 
-impl std::fmt::Display for FileId {
+impl std::fmt::Display for Hash64 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("{}", self.0))
     }
 }
+
+pub type FileId = Hash64;
 
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct FileChunkId {
@@ -86,6 +94,7 @@ pub struct FileMetadata {
     pub original_file_name: String,
     pub file_length: u64,
     pub number_of_chunks: u32,
+    pub chunk_hashes: Vec<Hash64>,
     pub merkle_root: Hash256,
     pub merkle_leaves: Vec<Hash256>,
     pub public: bool,
@@ -105,20 +114,20 @@ impl FileMetadata {
             original_file_name,
             file_length,
             number_of_chunks,
+            chunk_hashes: vec![],
             merkle_root,
             merkle_leaves,
             public,
         });
 
-        metadata.file_id = metadata.hash_sha256();
+        metadata.file_id = (&metadata).into();
+        metadata.chunk_hashes = metadata
+            .merkle_leaves
+            .iter()
+            .map(|merkle_hash| merkle_hash.into())
+            .collect();
 
         metadata
-    }
-
-    fn hash_sha256(&self) -> FileId {
-        let mut hasher = Sha256Hasher::default();
-        self.hash(&mut hasher);
-        FileId::new(hasher.finish())
     }
 }
 

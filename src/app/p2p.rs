@@ -34,7 +34,7 @@ use super::{
     fs::{FsCommand, FsHelper},
 };
 use crate::{
-    FileChunkId, FileMetadata,
+    FileChunkId, FileMetadata, Hash64,
     file_store::{self, PublishedFileRecord},
 };
 
@@ -70,6 +70,7 @@ pub enum P2pCommand {
     PublishFile(Box<FileMetadata>),
     DownloadFile {
         chunk_id: FileChunkId,
+        chunk_hash: Hash64,
         // timeout: Option<u64>,
         downloaded_contents_tx: oneshot::Sender<Option<Vec<u8>>>,
     },
@@ -328,13 +329,13 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     }) => closest_peers.pop(),
                     Err(e) => {
                         log::error!(target: LOG_TARGET, "Get providers of chunk[{}] failed: {e}", request_block.chunk_id);
-                        return Some(());
+                        return None;
                     }
                 };
 
                 let Some(neighbor_peer_id) = neighbor_peer_id else {
                     log::error!(target: LOG_TARGET, "No provider of chunk[{}] found", request_block.chunk_id);
-                    return Some(());
+                    return None;
                 };
 
                 let request_id = swarm
@@ -438,14 +439,14 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         .remove(request_block_pos)?;
 
                     let contents = match response {
-                        FileDownloadResponse::Success(contents) => Some(contents),
+                        FileDownloadResponse::Success(contents) => contents,
                         FileDownloadResponse::Error(e) => {
                             log::error!(target: LOG_TARGET, "Download chunk[{}] failed: {e}", request_block.chunk_id);
-                            None
+                            return None;
                         }
                     };
 
-                    request_block.downloaded_contents_tx.take()?.send(contents)
+                    request_block.downloaded_contents_tx.take()?.send(Some(contents))
                         .map_err(|_| {
                             log::error!(target: LOG_TARGET, "Send response of download chunk[{}] failed",
                                 request_block.chunk_id)
@@ -464,6 +465,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         chunk_id: FileChunkId,
         contents: Option<Vec<u8>>,
     ) -> Option<()> {
+        // fs service always returns, all requests will be handled at last
         let channels = self.file_download_remote_requests.remove(&chunk_id)
             .filter(|v| v.is_empty().not())
             .or_else(|| {
@@ -505,14 +507,17 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
 
         for chunk_index in 0..=(metadata.number_of_chunks as usize) {
             let chunk_id = FileChunkId::new(file_id, chunk_index);
-            let kad_key: Vec<u8> = (&chunk_id).into();
-            let kad_record = Record::new(
-                kad_key,
-                match chunk_index {
-                    0 => metadata.merkle_root.to_vec(),
-                    _ => metadata.merkle_leaves[chunk_index].to_vec(),
-                },
-            );
+
+            let kad_record = match chunk_index {
+                0 => Record::new(
+                    RecordKey::new(&file_id.to_array()),
+                    metadata.merkle_root.to_vec(),
+                ),
+                _ => Record::new(
+                    RecordKey::new(&metadata.chunk_hashes[chunk_index].to_array()),
+                    metadata.merkle_leaves[chunk_index].to_vec(),
+                ),
+            };
             let kad_key = kad_record.key.clone();
 
             swarm
@@ -534,6 +539,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         &mut self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
         chunk_id: FileChunkId,
+        chunk_hash: Hash64,
         downloaded_contents_tx: oneshot::Sender<Option<Vec<u8>>>,
     ) -> Option<()> {
         let file_id = chunk_id.file_id;
@@ -567,7 +573,11 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             };
         }
 
-        let kad_key: Vec<u8> = (&chunk_id).into();
+        let kad_key = match chunk_index {
+            0 => file_id,
+            _ => chunk_hash,
+        }
+        .to_array();
         let query_id = swarm
             .behaviour_mut()
             .kademlia
@@ -592,9 +602,15 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             }
             P2pCommand::DownloadFile {
                 chunk_id,
+                chunk_hash,
                 downloaded_contents_tx,
             } => {
-                self.handle_command_download_file(swarm, chunk_id, downloaded_contents_tx);
+                self.handle_command_download_file(
+                    swarm,
+                    chunk_id,
+                    chunk_hash,
+                    downloaded_contents_tx,
+                );
             }
         }
     }
@@ -612,7 +628,7 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                 break;
             }
 
-            log::error!(target: LOG_TARGET, "{} for chunk[{}] timeout", timeout_stage, request_block.chunk_id)
+            log::error!(target: LOG_TARGET, "{timeout_stage} for chunk[{}] timeout", request_block.chunk_id);
         }
     }
 
