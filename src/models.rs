@@ -1,5 +1,6 @@
 use std::hash::{Hash, Hasher};
 
+use rs_merkle::{MerkleTree, algorithms::Sha256};
 use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 
@@ -124,10 +125,23 @@ impl FileMetadata {
         metadata.chunk_hashes = metadata
             .merkle_leaves
             .iter()
-            .map(|merkle_hash| merkle_hash.into())
+            .map(|chunk_merkle_hash| chunk_merkle_hash.into())
             .collect();
 
         metadata
+    }
+
+    pub fn verify(&self) -> bool {
+        let number_of_chunks = self.number_of_chunks as usize;
+
+        FileId::from(self) == self.file_id
+            && self.chunk_hashes.len() == number_of_chunks
+            && self.merkle_leaves.len() == number_of_chunks
+            && self.merkle_leaves.iter().zip(self.chunk_hashes.iter()).all(
+                |(chunk_merkle_hash, chunk_hash)| Hash64::from(chunk_merkle_hash) == *chunk_hash,
+            )
+            && MerkleTree::<Sha256>::from_leaves(&self.merkle_leaves).root()
+                == Some(self.merkle_root)
     }
 }
 

@@ -101,34 +101,19 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                 None
             })?;
 
-        let metadata: Box<FileMetadata> = metadata_contents
-            .as_slice()
-            .try_into()
+        let metadata = <Box<FileMetadata>>::try_from(metadata_contents.as_slice())
             .map_err(|e| log::error!(target: LOG_TARGET, "Parse metadata[{file_id}] failed: {e}"))
-            .ok()?;
+            .ok()
+            .filter(|metadata| metadata.verify())?;
 
         log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id}][{}] with {} chunks",
             metadata.original_file_name, metadata.number_of_chunks);
-
-        // TODO: verify metadata
 
         FsHelper::write_file_metadata(download_directory, metadata_contents)
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Fs write metadata[{file_id}] failed: {e}");
             })
             .ok()?;
-
-        self.file_store
-            .add_downloading_file(DownloadingFileRecord {
-                file_id,
-                original_file_name: metadata.original_file_name.clone(),
-                download_directory: download_directory.to_path_buf(),
-            })
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Record downloading file[{file_id}] to file store failed: {e}");
-            })
-            .ok()?;
-
         Some(metadata)
     }
 
@@ -232,6 +217,16 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         mut download_path: PathBuf,
     ) -> Option<()> {
         download_path.push(file_id.to_string());
+
+        self.file_store
+            .add_downloading_file(DownloadingFileRecord {
+                file_id,
+                download_directory: download_path.clone(),
+            })
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Record downloading file[{file_id}] to file store failed: {e}");
+            })
+            .ok()?;
 
         let metadata = self.download_metadata(file_id, &download_path).await?;
 

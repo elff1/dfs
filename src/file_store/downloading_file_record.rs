@@ -9,7 +9,6 @@ const LOG_TARGET: &str = "file_store::downloading_file_record";
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadingFileRecord {
     pub file_id: FileId,
-    pub original_file_name: String,
     pub download_directory: PathBuf,
 }
 
