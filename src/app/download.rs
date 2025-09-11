@@ -139,15 +139,15 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         metadata: &FileMetadata,
     ) -> u32 {
         let mut chunk_ids = (1..=metadata.number_of_chunks as usize)
-            .map(|chunk_index| FileChunkId::new(file_id, chunk_index))
+            .map(|chunk_index| (FileChunkId::new(file_id, chunk_index), true))
             .collect::<VecDeque<_>>();
         let mut download_set = JoinSet::new();
         let mut downloaded_chunks_num = 0;
 
         loop {
             select! {
-                Some((chunk_id, download_chunk_rx)) = async {
-                    let chunk_id = chunk_ids.front()?;
+                Some((chunk_id, try_again_on_failure, download_chunk_rx)) = async {
+                    let (chunk_id, _) = chunk_ids.front()?;
 
                     let (tx, rx) = oneshot::channel();
                     let send_command_result = self
@@ -160,14 +160,17 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                         .await;
 
                     // pop after await, make sure this branch is cancellation safe
-                    let chunk_id = chunk_ids.pop_front().unwrap();
+                    let (chunk_id, try_again_on_failure) = chunk_ids.pop_front().unwrap();
                     match send_command_result {
                         Ok(_) => {
                             log::debug!(target: LOG_TARGET, "Start download chunk[{chunk_id}]");
-                            Some((chunk_id, rx))
+                            Some((chunk_id, try_again_on_failure, rx))
                         }
                         Err(e) => {
                             log::error!(target: LOG_TARGET, "Send download chunk[{chunk_id}] to P2P service failed: {e}");
+                            if try_again_on_failure {
+                                chunk_ids.push_back((chunk_id, false));
+                            }
                             None
                         }
                     }
@@ -186,17 +189,17 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                                 None
                             }
                             Ok(chunk) => chunk,
-                        }.ok_or(chunk_id)?;
+                        }.ok_or((chunk_id, try_again_on_failure))?;
 
-                        if Sha256::hash(&chunk) != chunk_merkle_hash {
+                        if Sha256::hash(chunk.as_slice()) != chunk_merkle_hash {
                             log::error!(target: LOG_TARGET, "Check chunk[{chunk_id}] hash failed");
-                            return Err(chunk_id);
+                            return Err((chunk_id, try_again_on_failure));
                         }
 
                         FsHelper::write_file_chunk(&download_directory, chunk_id.chunk_index, chunk)
                             .map_err(|e| {
                                 log::error!(target: LOG_TARGET, "Write chunk[{chunk_id}] to fs failed: {e}");
-                                chunk_id
+                                (chunk_id, try_again_on_failure)
                             })?;
 
                         Ok(chunk_id)
@@ -208,9 +211,11 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                             log::info!(target: LOG_TARGET, "Chunk[{chunk_id}] downloaded");
                             downloaded_chunks_num += 1;
                         }
-                        Err(chunk_id) => {
+                        Err((chunk_id, try_again_on_failure)) => {
                             log::error!(target: LOG_TARGET, "Download chunk[{chunk_id}] failed. Try again later.");
-                            chunk_ids.push_back(chunk_id);
+                            if try_again_on_failure {
+                                chunk_ids.push_back((chunk_id, false));
+                            }
                         }
                     };
                 }
@@ -238,7 +243,6 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             return None;
         }
 
-        // TODO: merge chunks
         let (tx, rx) = oneshot::channel();
         self.fs_command_tx
             .send(FsCommand::ProcessFileAfterDownload {
@@ -250,9 +254,22 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                 process_result_tx: tx,
             })
             .await
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Send command to FS service failed: {e}");
+            })
             .ok()?;
 
-        let _result = rx.await.map_err(|_| ()).ok()?;
+        match rx.await {
+            Err(e) => {
+                log::error!(target: LOG_TARGET, "Receive response for file[{file_id}] from FS service failed: {e}");
+                None
+            }
+            Ok(false) => {
+                log::error!(target: LOG_TARGET, "Process file[{file_id}] after download failed");
+                None
+            }
+            Ok(_) => Some(()),
+        }?;
 
         self.file_store.delete_downloading_file(file_id).unwrap_or_else(|e| {
                 log::error!(target: LOG_TARGET, "Delete downloading file from file store failed: {e}")
@@ -287,11 +304,11 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
               4. send download chunk task to task pool submodule
                 a. send command to P2P, download a chunk from peer like metadata
                 b. check hash, write chunk to fs
-        --->  5. after all chunks downloaded, merge together
+              5. after all chunks downloaded, merge together
               6. send command to P2P, publish file
               7. move file id from Downloading table to pubished table
               8. if any failiure, try again one more time
-              9. continue unfinished download work after restart; delete downloading record if file is downloaded
+        --->  9. continue unfinished download work after restart; delete downloading record if file is downloaded
 
               remove file from dfs system
               1. remove record from DHT

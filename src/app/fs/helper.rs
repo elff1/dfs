@@ -1,4 +1,9 @@
-use std::{borrow::Cow, fs, io, path::Path};
+use std::{
+    borrow::Cow,
+    fs::{self, File},
+    io,
+    path::Path,
+};
 
 use crate::FileMetadata;
 
@@ -27,6 +32,10 @@ impl FsHelper {
         fs::create_dir_all(directory)
     }
 
+    pub fn create_file<P: AsRef<Path>>(file_path: P) -> io::Result<File> {
+        File::create(file_path.as_ref())
+    }
+
     pub async fn read_file_metadata_async<P: AsRef<Path>>(
         chunks_directory: P,
     ) -> io::Result<Vec<u8>> {
@@ -45,7 +54,7 @@ impl FsHelper {
         chunks_directory: P,
         metadata: &FileMetadata,
     ) -> io::Result<()> {
-        let cbor_file = fs::File::create(chunks_directory.as_ref().join(FILE_METADATA_NAME))?;
+        let cbor_file = File::create(chunks_directory.as_ref().join(FILE_METADATA_NAME))?;
         serde_cbor::to_writer(cbor_file, metadata).map_err(|e| io::Error::other(e.to_string()))?;
 
         Ok(())

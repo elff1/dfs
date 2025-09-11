@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, BufWriter, Read, Write},
     mem::MaybeUninit,
     path::{Path, PathBuf},
 };
@@ -15,7 +15,7 @@ const LOG_TARGET: &str = "app::fs::processor";
 const CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug)]
-pub(super) struct FileProcessResult {
+pub(super) struct FileSplitResult {
     pub metadata: Box<FileMetadata>,
     pub chunks_directory: PathBuf,
 }
@@ -23,10 +23,7 @@ pub(super) struct FileProcessResult {
 pub(super) struct FileProcessor();
 
 impl FileProcessor {
-    pub fn process_file<P: AsRef<Path>>(
-        file_path: P,
-        public: bool,
-    ) -> io::Result<FileProcessResult> {
+    pub fn split_file<P: AsRef<Path>>(file_path: P, public: bool) -> io::Result<FileSplitResult> {
         let file_path = file_path.as_ref();
         let file_path_display = file_path.display();
 
@@ -35,7 +32,7 @@ impl FileProcessor {
         let process_result = if fs::metadata(file_path)?.is_dir() {
             todo!();
         } else {
-            process_one_file(file_path, public)?
+            split_one_file(file_path, public)?
         };
 
         log::info!(target: LOG_TARGET,
@@ -45,9 +42,34 @@ impl FileProcessor {
 
         Ok(process_result)
     }
+
+    pub fn merge_file<P: AsRef<Path>>(
+        chunks_directory: P,
+        original_file_name: &str,
+        number_of_chunks: u32,
+    ) -> io::Result<()> {
+        let chunks_directory = chunks_directory.as_ref();
+        let mut file_path = chunks_directory
+            .parent()
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                chunks_directory.to_string_lossy(),
+            ))?
+            .to_path_buf();
+        file_path.push(original_file_name);
+
+        let mut file_writter = BufWriter::new(FsHelper::create_file(&file_path)?);
+        for chunk_index in 1..=number_of_chunks as usize {
+            let chunk = FsHelper::read_file_chunk(chunks_directory, chunk_index)?;
+            file_writter.write_all(chunk.as_slice())?;
+        }
+        file_writter.flush()?;
+
+        Ok(())
+    }
 }
 
-fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessResult> {
+fn split_one_file(file_path: &Path, public: bool) -> io::Result<FileSplitResult> {
     let mut components = file_path.components();
     let file_name = components
         .next_back()
@@ -103,7 +125,7 @@ fn process_one_file(file_path: &Path, public: bool) -> io::Result<FileProcessRes
         .root()
         .ok_or(io::Error::other("can not get Merkle root"))?;
 
-    let result = FileProcessResult {
+    let result = FileSplitResult {
         metadata: FileMetadata::new(
             file_name,
             file_length,

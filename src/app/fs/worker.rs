@@ -37,7 +37,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                     return None;
                 }
 
-                let process_result = FileProcessor::process_file(file_path, public)
+                let split_result = FileProcessor::split_file(file_path, public)
                     .map_err(|e| {
                         log::error!(target: LOG_TARGET, "Process file[{file_path}] before publish failed: {e}");
                     })
@@ -45,10 +45,10 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
 
                 self.file_store
                     .add_published_file(PublishedFileRecord {
-                        file_id: process_result.metadata.file_id,
-                        original_file_name: process_result.metadata.original_file_name.clone(),
-                        chunks_directory: process_result.chunks_directory,
-                        public: process_result.metadata.public,
+                        file_id: split_result.metadata.file_id,
+                        original_file_name: split_result.metadata.original_file_name.clone(),
+                        chunks_directory: split_result.chunks_directory,
+                        public: split_result.metadata.public,
                     })
                     .map_err(|e| {
                         log::error!(target: LOG_TARGET, "Add new published file[{file_path}] to file store failed: {e}")
@@ -56,7 +56,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                     .ok()?;
 
                 metadata_tx.take()?
-                    .send(Some(process_result.metadata))
+                    .send(Some(split_result.metadata))
                     .map_err(|e| {
                         log::error!(target: LOG_TARGET, "Send metadata of file[{file_path}] failed: {e:?}");
                     })
@@ -66,7 +66,7 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                 ref mut chunks_directory,
                 file_id,
                 ref mut original_file_name,
-                number_of_chunks: _,
+                number_of_chunks,
                 public,
                 ref mut process_result_tx,
             } => {
@@ -75,6 +75,12 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                 }
                 let chunks_directory = chunks_directory.take()?;
                 let original_file_name = original_file_name.take()?;
+
+                FileProcessor::merge_file(&chunks_directory, &original_file_name, number_of_chunks)
+                    .map_err(|e| {
+                        log::error!(target: LOG_TARGET, "Process file[{file_id}] after download failed: {e:?}");
+                    })
+                    .ok()?;
 
                 self.file_store
                     .add_published_file(PublishedFileRecord {
