@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    ops::Not,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -64,18 +65,26 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         }
     }
 
+    // true for new downloaded metadata, false for metadata is already downloaded,
     async fn download_metadata(
-        &mut self,
+        &self,
         file_id: FileId,
         download_directory: &Path,
-    ) -> Option<Box<FileMetadata>> {
-        FsHelper::create_directory_async(download_directory, true)
+    ) -> Option<(Box<FileMetadata>, bool)> {
+        let metadata_result = FsHelper::read_file_metadata_async(download_directory)
             .await
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET,
-                    "Create download directory[{}] failed: {e}", download_directory.display());
+            .ok()
+            .and_then(|metadata| {
+                <Box<FileMetadata>>::try_from(metadata.as_slice()).map_err(|e| {
+                    log::error!(target: LOG_TARGET, "Parse file[{file_id}] metadata failed: {e}");
+                })
+                .ok()
             })
-            .ok()?;
+            .map(|metadata| (metadata, false));
+        if metadata_result.is_some() {
+            log::info!(target: LOG_TARGET, "Metadata of file[{file_id}] is already downloaded");
+            return metadata_result;
+        }
 
         let (tx, rx) = oneshot::channel();
         self.p2p_command_tx
@@ -104,7 +113,12 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         let metadata = <Box<FileMetadata>>::try_from(metadata_contents.as_slice())
             .map_err(|e| log::error!(target: LOG_TARGET, "Parse metadata[{file_id}] failed: {e}"))
             .ok()
-            .filter(|metadata| metadata.verify())?;
+            .filter(|metadata| {
+                metadata.verify() || {
+                    log::error!(target: LOG_TARGET, "Verify metadata[{file_id}] failed");
+                    false
+                }
+            })?;
 
         log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id}][{}] with {} chunks",
             metadata.original_file_name, metadata.number_of_chunks);
@@ -114,20 +128,17 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                 log::error!(target: LOG_TARGET, "Fs write metadata[{file_id}] failed: {e}");
             })
             .ok()?;
-        Some(metadata)
+
+        Some((metadata, true))
     }
 
     async fn download_chunks(
-        &mut self,
-        file_id: FileId,
+        &self,
+        mut chunk_ids: VecDeque<(FileChunkId, bool)>,
         download_directory: &Path,
         metadata: &FileMetadata,
-    ) -> u32 {
-        let mut chunk_ids = (1..=metadata.number_of_chunks as usize)
-            .map(|chunk_index| (FileChunkId::new(file_id, chunk_index), true))
-            .collect::<VecDeque<_>>();
+    ) -> VecDeque<(FileChunkId, bool)> {
         let mut download_set = JoinSet::new();
-        let mut downloaded_chunks_num = 0;
 
         loop {
             select! {
@@ -194,7 +205,6 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                     match download_result.unwrap() {
                         Ok(chunk_id) => {
                             log::info!(target: LOG_TARGET, "Chunk[{chunk_id}] downloaded");
-                            downloaded_chunks_num += 1;
                         }
                         Err((chunk_id, try_again_on_failure)) => {
                             log::error!(target: LOG_TARGET, "Download chunk[{chunk_id}] failed. Try again later.");
@@ -208,43 +218,63 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             }
         }
 
-        downloaded_chunks_num
+        chunk_ids
     }
 
-    async fn handle_download_one_file(
-        &mut self,
-        file_id: FileId,
-        mut download_path: PathBuf,
-    ) -> Option<()> {
-        download_path.push(file_id.to_string());
+    // Only new file download and restore unfinished file download run into this function
+    async fn download_one_file(&self, file_id: FileId, download_directory: PathBuf) -> Option<()> {
+        let mut try_again = true;
+        let (metadata, new_download) = loop {
+            if let Some(metadata_result) =
+                self.download_metadata(file_id, &download_directory).await
+            {
+                break metadata_result;
+            }
 
-        self.file_store
-            .add_downloading_file(DownloadingFileRecord {
-                file_id,
-                download_directory: download_path.clone(),
-            })
-            .map_err(|e| {
-                log::error!(target: LOG_TARGET, "Record downloading file[{file_id}] to file store failed: {e}");
-            })
-            .ok()?;
+            if try_again {
+                try_again = false;
+            } else {
+                return None;
+            }
+        };
 
-        let metadata = self.download_metadata(file_id, &download_path).await?;
+        let mut need_download_chunk_ids = VecDeque::new();
+        for chunk_index in 1..=metadata.number_of_chunks as usize {
+            let chunk_id = FileChunkId::new(file_id, chunk_index);
 
-        let downloaded_chunks_num = self
-            .download_chunks(file_id, &download_path, &metadata)
+            let need_download = new_download || {
+                if let Ok(chunk) =
+                    FsHelper::read_file_chunk_async(&download_directory, chunk_index).await
+                {
+                    Sha256::hash(chunk.as_slice()) != metadata.merkle_leaves[chunk_index]
+                } else {
+                    true
+                }
+            };
+
+            if need_download {
+                // true for download chunk again if failed
+                need_download_chunk_ids.push_back((chunk_id, true));
+            } else {
+                log::debug!(target: LOG_TARGET, "Chunk[{chunk_id}] is already downloaded");
+            }
+        }
+
+        let download_failed_chunk_ids = self
+            .download_chunks(need_download_chunk_ids, &download_directory, &metadata)
             .await;
-        if downloaded_chunks_num != metadata.number_of_chunks {
-            log::error!(target: LOG_TARGET, "Only {downloaded_chunks_num} of {} chunks downloaded", metadata.number_of_chunks);
+        if download_failed_chunk_ids.is_empty().not() {
+            log::error!(target: LOG_TARGET, "{} of {} chunks download failed", download_failed_chunk_ids.len(), metadata.number_of_chunks);
             return None;
         }
 
         let (tx, rx) = oneshot::channel();
         self.fs_command_tx
             .send(FsCommand::ProcessFileAfterDownload {
-                chunks_directory: download_path,
+                chunks_directory: download_directory,
                 file_id,
                 original_file_name: metadata.original_file_name.clone(),
-                number_of_chunks: downloaded_chunks_num,
+                number_of_chunks: metadata.number_of_chunks,
                 public: metadata.public,
                 process_result_tx: tx,
             })
@@ -279,57 +309,81 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             });
 
         /* TODO:
-              make file processor a multi-thread service, each thread wait on a mpmc rx(using sync fs call). commands:
-              1. process file (split into chunks)
-              2. read chunk
-
-              publish file:
-              do not delete the folder
-
-              metadata download:
-              1. oneshoot send/recv vec<u8>
-              2. P2pCommand::download request, file_id, chunk_id(0: metadata, 1..n: chunks)
-              3. updata DHT record key: publish, get
-              4. handle download request event: read DB, read fs(file processor is multi-thread), send event response(swam is multi-thread)
-
-              file download (one file at a time):
-              1. publish chunks on P2P DHT
-              2. delete download folder
-              3. download metadata, write to fs(create folder automatically if not exist), record to DB Downloading table
-              4. send download chunk task to task pool submodule
-                a. send command to P2P, download a chunk from peer like metadata
-                b. check hash, write chunk to fs
-              5. after all chunks downloaded, merge together
-              6. send command to P2P, publish file
-              7. move file id from Downloading table to pubished table
-              8. if any failiure, try again one more time
-        --->  9. continue unfinished download work after restart; delete downloading record if file is downloaded
-
               remove file from dfs system
               1. remove record from DHT
               2. remove record from DB
               3. remove chunks from fs
               4. remove file from fs if requred
 
-              1. fs: adjust metadata(add FileMetadata): remove chunks_directory, add file length;
-                    FsCommand distribute into three sub-command: FileProcessCommand, FileMetadataCommand, FileChunkCommand; handled by workers equally;
-                    add FileId in FileMetadata; make FileProcessResult public in FsService only
-              2. p2p: add Hash256; add DhtKey(u64): metadata = FileId, chunk = hash(Sha256)
-              3. support download folder
+              1. support download folder
+              2. download speed
             */
 
         Some(())
     }
 
-    async fn handle_command(&mut self, command: DownloadCommand) -> Option<()> {
+    async fn handle_command_download_one_file(
+        &self,
+        file_id: FileId,
+        mut download_path: PathBuf,
+    ) -> Option<()> {
+        download_path.push(file_id.to_string());
+
+        FsHelper::create_directory_async(&download_path, true)
+            .await
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET,
+                    "Create download directory[{}] failed: {e}", download_path.display());
+            })
+            .ok()?;
+
+        self.file_store
+            .add_downloading_file(DownloadingFileRecord {
+                file_id,
+                download_directory: download_path.clone(),
+            })
+            .map_err(|e| {
+                log::error!(target: LOG_TARGET, "Record downloading file[{file_id}] to file store failed: {e}");
+            })
+            .ok()?;
+
+        self.download_one_file(file_id, download_path).await
+    }
+
+    async fn handle_command(&self, command: DownloadCommand) -> Option<()> {
         match command {
             DownloadCommand::OneFile {
                 file_id,
                 download_path,
             } => {
-                self.handle_download_one_file(file_id, download_path)
+                self.handle_command_download_one_file(file_id, download_path)
                     .await?;
             }
+        }
+
+        Some(())
+    }
+
+    async fn download_unfinished_files(&self) -> Option<()> {
+        let records = self.file_store.get_all_downloading_files().map_err(|e| {
+            log::error!(target: LOG_TARGET, "Get all downloadinig files from file store failed: {e}");
+        }).ok()?;
+
+        for DownloadingFileRecord {
+            file_id,
+            download_directory,
+        } in records
+        {
+            FsHelper::create_directory_async(&download_directory, false)
+                .await
+                .map_err(|e| {
+                    log::error!(target: LOG_TARGET,
+                        "Create download directory[{}] failed: {e}", download_directory.display()
+                    );
+                })
+                .ok()?;
+
+            self.download_one_file(file_id, download_directory).await;
         }
 
         Some(())
@@ -339,6 +393,8 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         mut self,
         cancel_token: CancellationToken,
     ) -> Result<(), DownloadServiceError> {
+        self.download_unfinished_files().await;
+
         loop {
             select! {
                 command = self.download_command_rx.recv() => {

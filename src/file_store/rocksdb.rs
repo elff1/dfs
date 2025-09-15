@@ -121,6 +121,7 @@ impl RocksDb {
         Ok(self.db.key_may_exist_cf(cf, file_id.to_array()))
     }
 
+    #[allow(dead_code)]
     fn get_downloading_file(
         &self,
         file_id: FileId,

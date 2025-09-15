@@ -61,6 +61,18 @@ impl FsHelper {
     }
 
     /// 0: metadata, 1..n: chunks
+    pub async fn read_file_chunk_async<P: AsRef<Path>>(
+        chunks_directory: P,
+        chunk_index: usize,
+    ) -> io::Result<Vec<u8>> {
+        let file_name = match chunk_index {
+            0 => Cow::Borrowed(FILE_METADATA_NAME),
+            _ => Cow::Owned(format!("{FILE_CHUNK_NAME}{chunk_index}")),
+        };
+        tokio::fs::read(chunks_directory.as_ref().join(file_name.as_ref())).await
+    }
+
+    /// 0: metadata, 1..n: chunks
     pub fn read_file_chunk<P: AsRef<Path>>(
         chunks_directory: P,
         chunk_index: usize,
