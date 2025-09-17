@@ -26,20 +26,17 @@ use crate::{
 const LOG_TARGET: &str = "app::server";
 
 #[derive(Debug, Error)]
-#[allow(dead_code)] // Remove this line if you plan to use all variants
 pub enum ServerError {
-    #[error("Failed to bind to address: {0}")]
-    Bind(String),
-
+    // #[error("Failed to bind to address: {0}")]
+    // Bind(String),
     #[error("Failed to start server: {0}")]
     Start(String),
 
-    #[error("Failed to handle request: {0}")]
-    Request(String),
+    // #[error("Failed to handle request: {0}")]
+    // Request(String),
 
-    #[error("Failed to send response: {0}")]
-    Response(String),
-
+    // #[error("Failed to send response: {0}")]
+    // Response(String),
     #[error("I/O error: {0}")]
     IO(#[from] io::Error),
 

@@ -42,12 +42,12 @@ impl FsHelper {
         tokio::fs::read(chunks_directory.as_ref().join(FILE_METADATA_NAME)).await
     }
 
-    pub fn write_file_metadata<P, C>(chunks_directory: P, contents: C) -> io::Result<()>
+    pub async fn write_file_metadata_async<P, C>(chunks_directory: P, contents: C) -> io::Result<()>
     where
         P: AsRef<Path>,
         C: AsRef<[u8]>,
     {
-        fs::write(chunks_directory.as_ref().join(FILE_METADATA_NAME), contents)
+        tokio::fs::write(chunks_directory.as_ref().join(FILE_METADATA_NAME), contents).await
     }
 
     pub fn serde_write_file_metadata<P: AsRef<Path>>(
@@ -82,6 +82,24 @@ impl FsHelper {
             _ => Cow::Owned(format!("{FILE_CHUNK_NAME}{chunk_index}")),
         };
         fs::read(chunks_directory.as_ref().join(file_name.as_ref()))
+    }
+
+    pub async fn write_file_chunk_async<P, C>(
+        chunks_directory: P,
+        chunk_index: usize,
+        contents: C,
+    ) -> io::Result<()>
+    where
+        P: AsRef<Path>,
+        C: AsRef<[u8]>,
+    {
+        tokio::fs::write(
+            chunks_directory
+                .as_ref()
+                .join(format!("{FILE_CHUNK_NAME}{chunk_index}")),
+            contents,
+        )
+        .await
     }
 
     pub fn write_file_chunk<P, C>(

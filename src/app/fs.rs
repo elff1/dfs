@@ -221,7 +221,7 @@ impl<F: file_store::Store + Send + Sync + 'static> Service for FsService<F> {
                 file_chunk_command_rx: self.file_chunk_command_rx.clone(),
             };
 
-            worker_set.spawn_blocking(async move || worker.start().await);
+            worker_set.spawn(worker.start());
         }
 
         self.start_inner(cancel_token).await?;
@@ -242,11 +242,11 @@ impl Drop for FileProcessCommand {
                 public: _,
                 metadata_tx,
             } => {
-                log::warn!(target: LOG_TARGET,
-                    "Send None as response of process before publish file[{file_path}] because of failure"
-                );
-
                 if let Some(tx) = metadata_tx.take() {
+                    log::warn!(target: LOG_TARGET,
+                        "Send None as response of process before publish file[{file_path}] because of failure"
+                    );
+
                     tx.send(None).unwrap_or_else(|_| {
                         log::error!(target: LOG_TARGET,
                             "Send response of process before publish file[{file_path}] failed"
@@ -262,11 +262,11 @@ impl Drop for FileProcessCommand {
                 public: _,
                 process_result_tx,
             } => {
-                log::warn!(target: LOG_TARGET,
-                    "Send false as response of process after download file[{file_id}] because of failure"
-                );
-
                 if let Some(tx) = process_result_tx.take() {
+                    log::warn!(target: LOG_TARGET,
+                        "Send false as response of process after download file[{file_id}] because of failure"
+                    );
+
                     tx.send(false).unwrap_or_else(|_| {
                         log::error!(target: LOG_TARGET,
                             "Send response of process after download file[{file_id}] failed"
@@ -285,11 +285,11 @@ impl Drop for FileMetadataCommand {
                 file_id,
                 contents_tx,
             } => {
-                log::warn!(target: LOG_TARGET,
-                    "Send None as response of read file[{file_id}] metadata because of failure"
-                );
-
                 if let Some(tx) = contents_tx.take() {
+                    log::warn!(target: LOG_TARGET,
+                        "Send None as response of read file[{file_id}] metadata because of failure"
+                    );
+
                     tx.try_send((FileChunkId::new(*file_id, 0), None))
                         .unwrap_or_else(|e| {
                             log::error!(target: LOG_TARGET,
@@ -309,11 +309,11 @@ impl Drop for FileChunkCommand {
                 chunk_id,
                 contents_tx,
             } => {
-                log::warn!(target: LOG_TARGET,
-                    "Send None as response of read chunk[{chunk_id}] because of failure"
-                );
-
                 if let Some(tx) = contents_tx.take() {
+                    log::warn!(target: LOG_TARGET,
+                        "Send None as response of read chunk[{chunk_id}] because of failure"
+                    );
+
                     tx.try_send((*chunk_id, None)).unwrap_or_else(|e| {
                         log::error!(target: LOG_TARGET,
                             "Send response of read chunk[{chunk_id}] failed: {e}"

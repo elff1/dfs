@@ -25,6 +25,7 @@ use thiserror::Error;
 use tokio::{
     fs, io, select,
     sync::{mpsc, oneshot},
+    time::MissedTickBehavior,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -514,8 +515,8 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                     metadata.merkle_root.to_vec(),
                 ),
                 _ => Record::new(
-                    RecordKey::new(&metadata.chunk_hashes[chunk_index].to_array()),
-                    metadata.merkle_leaves[chunk_index].to_vec(),
+                    RecordKey::new(&metadata.chunk_hashes[chunk_index - 1].to_array()),
+                    metadata.merkle_leaves[chunk_index - 1].to_vec(),
                 ),
             };
             let kad_key = kad_record.key.clone();
@@ -545,33 +546,6 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         let file_id = chunk_id.file_id;
         let chunk_index = chunk_id.chunk_index;
         log::info!(target: LOG_TARGET, "Start to download chunk[{chunk_id}]");
-
-        // if file is downloaded or downloading, no need to download again
-        if chunk_index == 0 {
-            let mut file_exists = self.file_store.published_file_exists(file_id).map_err(|e| {
-                    log::error!(target: LOG_TARGET, "Check whether file[{file_id}] is published failed: {e}");
-                })
-                .into_iter()
-                .chain(self.file_store.downloading_file_exists(file_id).map_err(|e| {
-                    log::error!(target: LOG_TARGET, "Check whether file[{file_id}] is downloading failed: {e}");
-                }));
-
-            let file_exists = match file_exists.next() {
-                Some(false) => file_exists.next(),
-                Some(true) => Some(true),
-                None => None,
-            };
-
-            let Some(false) = file_exists else {
-                if file_exists.is_some() {
-                    log::warn!(target: LOG_TARGET, "No need to download file[{file_id}]");
-                }
-
-                return downloaded_contents_tx.send(None).map_err(|_| {
-                    log::error!(target: LOG_TARGET, "Send response of download chunk[{}] failed", chunk_id)
-                }).ok();
-            };
-        }
 
         let kad_key = match chunk_index {
             0 => file_id,
@@ -615,23 +589,6 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         }
     }
 
-    fn handle_tick(&mut self) {
-        while let Some(request_block) = self.file_download_local_requests.pop_front() {
-            let (timeout, timeout_stage) = if request_block.kad_get_providers_query_id.is_some() {
-                (Duration::from_secs(20), "Get providers")
-            } else {
-                (Duration::from_secs(100), "Download contents")
-            };
-
-            if request_block.start_timestamp.elapsed() < timeout {
-                self.file_download_local_requests.push_front(request_block);
-                break;
-            }
-
-            log::error!(target: LOG_TARGET, "{timeout_stage} for chunk[{}] timeout", request_block.chunk_id);
-        }
-    }
-
     async fn publish_one_stored_file(
         &self,
         swarm: &mut Swarm<P2pNetworkBehaviour>,
@@ -669,6 +626,27 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
         Some(())
     }
 
+    async fn handle_tick(&mut self, swarm: Option<&mut Swarm<P2pNetworkBehaviour>>) {
+        if let Some(swarm) = swarm {
+            self.publish_stored_files(swarm).await;
+        }
+
+        while let Some(request_block) = self.file_download_local_requests.pop_front() {
+            let (timeout, timeout_stage) = if request_block.kad_get_providers_query_id.is_some() {
+                (Duration::from_secs(20), "Get providers")
+            } else {
+                (Duration::from_secs(100), "Download contents")
+            };
+
+            if request_block.start_timestamp.elapsed() < timeout {
+                self.file_download_local_requests.push_front(request_block);
+                break;
+            }
+
+            log::error!(target: LOG_TARGET, "{timeout_stage} for chunk[{}] timeout", request_block.chunk_id);
+        }
+    }
+
     async fn start_inner(mut self, cancel_token: CancellationToken) -> Result<(), P2pNetworkError> {
         let mut swarm = self.swarm().await?;
         log::info!(target: LOG_TARGET, "Peer ID: {}", swarm.local_peer_id());
@@ -683,9 +661,13 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
             .gossipsub
             .subscribe(&file_owners_topic)?;
 
-        self.publish_stored_files(&mut swarm).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // skip the first tick
+        interval.tick().await;
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        // publish stored files at the second tick
+        let mut need_publish_stored_files = true;
 
         loop {
             select! {
@@ -730,7 +712,15 @@ impl<F: file_store::Store + Send + Sync + 'static> P2pService<F> {
                         self.handle_command(&mut swarm, command);
                     }
                 },
-                _ = interval.tick() => self.handle_tick(),
+                _ = interval.tick() => {
+                    if need_publish_stored_files {
+                        need_publish_stored_files = false;
+                        self.handle_tick(Some(&mut swarm)).await;
+                    }
+                    else {
+                        self.handle_tick(None).await;
+                    }
+                }
                 _ = cancel_token.cancelled() => {
                     log::info!(target: LOG_TARGET, "P2P service is shutting down...");
                     break;
@@ -748,6 +738,8 @@ impl<F: file_store::Store + Send + Sync + 'static> Service for P2pService<F> {
         log::info!(target: LOG_TARGET, "P2P service starting...");
 
         self.start_inner(cancel_token).await?;
+
+        log::info!(target: LOG_TARGET, "P2P service has shut down");
 
         Ok(())
     }

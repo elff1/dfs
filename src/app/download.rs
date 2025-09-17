@@ -1,8 +1,9 @@
 use std::{
-    collections::VecDeque,
+    collections::BinaryHeap,
     ops::Not,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -26,6 +27,7 @@ use crate::{
 };
 
 const LOG_TARGET: &str = "app::download";
+const DOWNLOAD_CHUNK_RETRY_TIMES: u8 = 2;
 
 #[derive(Debug, Error)]
 pub enum DownloadServiceError {
@@ -33,6 +35,35 @@ pub enum DownloadServiceError {
     IO(#[from] io::Error),
     // #[error("File store error: {0}")]
     // FileStore(#[from] FileStoreError),
+}
+
+#[derive(Clone, Copy)]
+struct DownloadChunkTask {
+    chunk_id: FileChunkId,
+    retry_times: u8,
+}
+
+impl PartialEq for DownloadChunkTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for DownloadChunkTask {}
+
+impl PartialOrd for DownloadChunkTask {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DownloadChunkTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.retry_times.cmp(&other.retry_times) {
+            std::cmp::Ordering::Equal => other.chunk_id.chunk_index.cmp(&self.chunk_id.chunk_index),
+            ord => ord,
+        }
+    }
 }
 
 pub enum DownloadCommand {
@@ -65,13 +96,12 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         }
     }
 
-    // true for new downloaded metadata, false for metadata is already downloaded,
     async fn download_metadata(
         &self,
         file_id: FileId,
         download_directory: &Path,
-    ) -> Option<(Box<FileMetadata>, bool)> {
-        let metadata_result = FsHelper::read_file_metadata_async(download_directory)
+    ) -> Option<Box<FileMetadata>> {
+        let read_metadata_result = FsHelper::read_file_metadata_async(download_directory)
             .await
             .ok()
             .and_then(|metadata| {
@@ -79,11 +109,10 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                     log::error!(target: LOG_TARGET, "Parse file[{file_id}] metadata failed: {e}");
                 })
                 .ok()
-            })
-            .map(|metadata| (metadata, false));
-        if metadata_result.is_some() {
+            });
+        if read_metadata_result.is_some() {
             log::info!(target: LOG_TARGET, "Metadata of file[{file_id}] is already downloaded");
-            return metadata_result;
+            return read_metadata_result;
         }
 
         let (tx, rx) = oneshot::channel();
@@ -123,82 +152,88 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         log::info!(target: LOG_TARGET, "Downloaded metadata of file[{file_id}][{}] with {} chunks",
             metadata.original_file_name, metadata.number_of_chunks);
 
-        FsHelper::write_file_metadata(download_directory, metadata_contents)
+        FsHelper::write_file_metadata_async(download_directory, metadata_contents)
+            .await
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Fs write metadata[{file_id}] failed: {e}");
             })
             .ok()?;
 
-        Some((metadata, true))
+        Some(metadata)
     }
 
     async fn download_chunks(
         &self,
-        mut chunk_ids: VecDeque<(FileChunkId, bool)>,
+        mut download_chunk_tasks: BinaryHeap<DownloadChunkTask>,
         download_directory: &Path,
         metadata: &FileMetadata,
-    ) -> VecDeque<(FileChunkId, bool)> {
+    ) -> BinaryHeap<DownloadChunkTask> {
         let mut download_set = JoinSet::new();
 
         loop {
             select! {
-                Some((chunk_id, try_again_on_failure, download_chunk_rx)) = async {
-                    let (chunk_id, _) = chunk_ids.front()?;
+                Some((download_chunk_task, download_chunk_rx)) = async {
+                    let download_chunk_task = download_chunk_tasks.peek()?;
+                    if download_chunk_task.retry_times == 0 {
+                        return None;
+                    }
 
                     let (tx, rx) = oneshot::channel();
                     let send_command_result = self
                         .p2p_command_tx
                         .send(P2pCommand::DownloadFile {
-                            chunk_id: *chunk_id,
-                            chunk_hash: metadata.chunk_hashes[chunk_id.chunk_index],
+                            chunk_id: download_chunk_task.chunk_id,
+                            chunk_hash: metadata.chunk_hashes[download_chunk_task.chunk_id.chunk_index - 1],
                             downloaded_contents_tx: tx,
                         })
                         .await;
 
                     // pop after await, make sure this branch is cancellation safe
-                    let (chunk_id, try_again_on_failure) = chunk_ids.pop_front().unwrap();
+                    let mut download_chunk_task = download_chunk_tasks.pop().unwrap();
                     match send_command_result {
-                        Ok(_) => {
-                            log::debug!(target: LOG_TARGET, "Start download chunk[{chunk_id}]");
-                            Some((chunk_id, try_again_on_failure, rx))
-                        }
                         Err(e) => {
-                            log::error!(target: LOG_TARGET, "Send download chunk[{chunk_id}] to P2P service failed: {e}");
-                            if try_again_on_failure {
-                                chunk_ids.push_back((chunk_id, false));
-                            }
+                            log::error!(target: LOG_TARGET, "Send download chunk[{}] to P2P service failed: {e}", download_chunk_task.chunk_id);
+
+                            download_chunk_task.retry_times -= 1;
+                            download_chunk_tasks.push(download_chunk_task);
+
                             None
+                        }
+                        Ok(_) => {
+                            log::debug!(target: LOG_TARGET, "Start download chunk[{}]", download_chunk_task.chunk_id);
+                            Some((download_chunk_task, rx))
                         }
                     }
                 } => {
-                    let chunk_merkle_hash = metadata.merkle_leaves[chunk_id.chunk_index];
+                    let chunk_merkle_hash = metadata.merkle_leaves[download_chunk_task.chunk_id.chunk_index - 1];
                     let download_directory = download_directory.to_path_buf();
 
                     download_set.spawn(async move {
                         let chunk = match download_chunk_rx.await {
                             Err(e) => {
-                                log::error!(target: LOG_TARGET, "Receive chunk[{chunk_id}] from P2P service failed: {e}");
+                                log::error!(target: LOG_TARGET, "Receive chunk[{}] from P2P service failed: {e}", download_chunk_task.chunk_id);
                                 None
                             }
                             Ok(None) => {
-                                log::error!(target: LOG_TARGET, "Receive chunk[{chunk_id}]: None");
+                                log::error!(target: LOG_TARGET, "Receive chunk[{}]: None", download_chunk_task.chunk_id);
                                 None
                             }
                             Ok(chunk) => chunk,
-                        }.ok_or((chunk_id, try_again_on_failure))?;
+                        }.ok_or(download_chunk_task)?;
 
                         if Sha256::hash(chunk.as_slice()) != chunk_merkle_hash {
-                            log::error!(target: LOG_TARGET, "Check chunk[{chunk_id}] hash failed");
-                            return Err((chunk_id, try_again_on_failure));
+                            log::error!(target: LOG_TARGET, "Check chunk[{}] hash failed", download_chunk_task.chunk_id);
+                            return Err(download_chunk_task);
                         }
 
-                        FsHelper::write_file_chunk(&download_directory, chunk_id.chunk_index, chunk)
+                        FsHelper::write_file_chunk_async(&download_directory, download_chunk_task.chunk_id.chunk_index, chunk)
+                            .await
                             .map_err(|e| {
-                                log::error!(target: LOG_TARGET, "Write chunk[{chunk_id}] to fs failed: {e}");
-                                (chunk_id, try_again_on_failure)
+                                log::error!(target: LOG_TARGET, "Write chunk[{}] to fs failed: {e}", download_chunk_task.chunk_id);
+                                download_chunk_task
                             })?;
 
-                        Ok(chunk_id)
+                        Ok(download_chunk_task.chunk_id)
                     });
                 }
                 Some(download_result) = download_set.join_next() => {
@@ -206,11 +241,11 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                         Ok(chunk_id) => {
                             log::info!(target: LOG_TARGET, "Chunk[{chunk_id}] downloaded");
                         }
-                        Err((chunk_id, try_again_on_failure)) => {
-                            log::error!(target: LOG_TARGET, "Download chunk[{chunk_id}] failed. Try again later.");
-                            if try_again_on_failure {
-                                chunk_ids.push_back((chunk_id, false));
-                            }
+                        Err(mut download_chunk_task) => {
+                            log::error!(target: LOG_TARGET, "Download chunk[{}] failed. Try again later.", download_chunk_task.chunk_id);
+
+                            download_chunk_task.retry_times -= 1;
+                            download_chunk_tasks.push(download_chunk_task);
                         }
                     };
                 }
@@ -218,13 +253,15 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             }
         }
 
-        chunk_ids
+        download_chunk_tasks
     }
 
     // Only new file download and restore unfinished file download run into this function
     async fn download_one_file(&self, file_id: FileId, download_directory: PathBuf) -> Option<()> {
+        log::info!(target: LOG_TARGET, "Start to download file[{file_id}]");
+
         let mut try_again = true;
-        let (metadata, new_download) = loop {
+        let metadata = loop {
             if let Some(metadata_result) =
                 self.download_metadata(file_id, &download_directory).await
             {
@@ -238,33 +275,34 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             }
         };
 
-        let mut need_download_chunk_ids = VecDeque::new();
-        for chunk_index in 1..=metadata.number_of_chunks as usize {
+        let number_of_chunks = metadata.number_of_chunks as usize;
+        let mut need_download_chunk_tasks = BinaryHeap::with_capacity(number_of_chunks);
+        for chunk_index in 1..=number_of_chunks {
             let chunk_id = FileChunkId::new(file_id, chunk_index);
 
-            let need_download = new_download || {
-                if let Ok(chunk) =
-                    FsHelper::read_file_chunk_async(&download_directory, chunk_index).await
-                {
-                    Sha256::hash(chunk.as_slice()) != metadata.merkle_leaves[chunk_index]
-                } else {
-                    true
-                }
+            let need_download = if let Ok(chunk) =
+                FsHelper::read_file_chunk_async(&download_directory, chunk_index).await
+            {
+                Sha256::hash(chunk.as_slice()) != metadata.merkle_leaves[chunk_index - 1]
+            } else {
+                true
             };
 
             if need_download {
-                // true for download chunk again if failed
-                need_download_chunk_ids.push_back((chunk_id, true));
+                need_download_chunk_tasks.push(DownloadChunkTask {
+                    chunk_id,
+                    retry_times: DOWNLOAD_CHUNK_RETRY_TIMES,
+                });
             } else {
                 log::debug!(target: LOG_TARGET, "Chunk[{chunk_id}] is already downloaded");
             }
         }
 
-        let download_failed_chunk_ids = self
-            .download_chunks(need_download_chunk_ids, &download_directory, &metadata)
+        let download_failed_chunk_tasks = self
+            .download_chunks(need_download_chunk_tasks, &download_directory, &metadata)
             .await;
-        if download_failed_chunk_ids.is_empty().not() {
-            log::error!(target: LOG_TARGET, "{} of {} chunks download failed", download_failed_chunk_ids.len(), metadata.number_of_chunks);
+        if download_failed_chunk_tasks.is_empty().not() {
+            log::error!(target: LOG_TARGET, "{} of {} chunks download failed", download_failed_chunk_tasks.len(), metadata.number_of_chunks);
             return None;
         }
 
@@ -293,7 +331,10 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
                 log::error!(target: LOG_TARGET, "Process file[{file_id}] after download failed");
                 None
             }
-            Ok(_) => Some(()),
+            Ok(_) => {
+                log::info!(target: LOG_TARGET, "File[{file_id}] downloaded");
+                Some(())
+            }
         }?;
 
         self.file_store.delete_downloading_file(file_id).unwrap_or_else(|e| {
@@ -309,15 +350,17 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
             });
 
         /* TODO:
-              remove file from dfs system
-              1. remove record from DHT
-              2. remove record from DB
-              3. remove chunks from fs
-              4. remove file from fs if requred
+          remove file from dfs system
+          1. remove record from DHT
+          2. remove record from DB
+          3. remove chunks from fs
+          4. remove file from fs if requred
 
-              1. support download folder
-              2. download speed
-            */
+          1. support download folder
+          2. download pause/resume; restart failed file download; remove published file if deleted or changed
+          3. parallel files download
+          4. restart download after 2s; download speed
+        */
 
         Some(())
     }
@@ -327,6 +370,30 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         file_id: FileId,
         mut download_path: PathBuf,
     ) -> Option<()> {
+        // if file is downloaded or downloading, no need to download again
+        let mut file_exists = self.file_store.published_file_exists(file_id).map_err(|e| {
+                log::error!(target: LOG_TARGET, "Check whether file[{file_id}] is published failed: {e}");
+            })
+            .into_iter()
+            .chain(self.file_store.downloading_file_exists(file_id).map_err(|e| {
+                log::error!(target: LOG_TARGET, "Check whether file[{file_id}] is downloading failed: {e}");
+            }));
+
+        let file_exists = match file_exists.next() {
+            Some(false) => file_exists.next(),
+            Some(true) => Some(true),
+            None => None,
+        };
+
+        if file_exists != Some(false) {
+            if file_exists.is_some() {
+                log::warn!(target: LOG_TARGET, "No need to download file[{file_id}]");
+            }
+
+            return None;
+        };
+
+        // start to download
         download_path.push(file_id.to_string());
 
         FsHelper::create_directory_async(&download_path, true)
@@ -393,6 +460,9 @@ impl<F: file_store::Store + Send + Sync + 'static> DownloadService<F> {
         mut self,
         cancel_token: CancellationToken,
     ) -> Result<(), DownloadServiceError> {
+        // wait for P2P network ready
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
         self.download_unfinished_files().await;
 
         loop {
@@ -419,6 +489,8 @@ impl<F: file_store::Store + Send + Sync + 'static> Service for DownloadService<F
         log::info!(target: LOG_TARGET, "Download service starting...");
 
         self.start_inner(cancel_token).await?;
+
+        log::info!(target: LOG_TARGET, "Download service has shut down");
 
         Ok(())
     }

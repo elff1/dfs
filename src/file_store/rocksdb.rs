@@ -121,18 +121,17 @@ impl RocksDb {
         Ok(self.db.key_may_exist_cf(cf, file_id.to_array()))
     }
 
-    #[allow(dead_code)]
-    fn get_downloading_file(
-        &self,
-        file_id: FileId,
-    ) -> Result<Option<DownloadingFileRecord>, RocksDbStoreError> {
-        let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
-        Ok(self
-            .db
-            .get_cf(cf, file_id.to_array())?
-            .map(|value| value.as_slice().try_into())
-            .transpose()?)
-    }
+    // fn get_downloading_file(
+    //     &self,
+    //     file_id: FileId,
+    // ) -> Result<Option<DownloadingFileRecord>, RocksDbStoreError> {
+    //     let cf = self.column_family(DOWNLOADING_FILES_COLUMN_FAMILY_NAME)?;
+    //     Ok(self
+    //         .db
+    //         .get_cf(cf, file_id.to_array())?
+    //         .map(|value| value.as_slice().try_into())
+    //         .transpose()?)
+    // }
 
     fn get_all_downloading_files(
         &self,
@@ -197,12 +196,12 @@ impl Store for RocksDb {
         Ok(self.downloading_file_exists(file_id)?)
     }
 
-    fn get_downloading_file(
-        &self,
-        file_id: FileId,
-    ) -> Result<Option<DownloadingFileRecord>, FileStoreError> {
-        Ok(self.get_downloading_file(file_id)?)
-    }
+    // fn get_downloading_file(
+    //     &self,
+    //     file_id: FileId,
+    // ) -> Result<Option<DownloadingFileRecord>, FileStoreError> {
+    //     Ok(self.get_downloading_file(file_id)?)
+    // }
 
     fn get_all_downloading_files(
         &self,

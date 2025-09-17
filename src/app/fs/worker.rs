@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::select;
+use tokio::{runtime::Handle, select};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -33,11 +33,14 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                 ref mut metadata_tx,
             } => {
                 if metadata_tx.is_none() {
-                    log::error!(target: LOG_TARGET, "Process file[{file_path}] before publish failed: no metadata_tx in command");
+                    log::error!(target: LOG_TARGET,
+                        "Process file[{file_path}] before publish failed: no metadata_tx in command"
+                    );
                     return None;
                 }
 
-                let split_result = FileProcessor::split_file(file_path, public)
+                let file_path_str = file_path.to_string();
+                let split_result = asyncify(move || FileProcessor::split_file(file_path_str, public)).await
                     .map_err(|e| {
                         log::error!(target: LOG_TARGET, "Process file[{file_path}] before publish failed: {e}");
                     })
@@ -76,7 +79,9 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                 let chunks_directory = chunks_directory.take()?;
                 let original_file_name = original_file_name.take()?;
 
-                FileProcessor::merge_file(&chunks_directory, &original_file_name, number_of_chunks)
+                let chunks_directory_clone = chunks_directory.clone();
+                let original_file_name_clone = original_file_name.clone();
+                asyncify(move || FileProcessor::merge_file(&chunks_directory_clone, &original_file_name_clone, number_of_chunks)).await
                     .map_err(|e| {
                         log::error!(target: LOG_TARGET, "Process file[{file_id}] after download failed: {e:?}");
                     })
@@ -90,8 +95,15 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
                         public,
                     })
                     .map_err(
-                        |e| log::error!(target: LOG_TARGET, "Add publish file to file store failed: {e}"),
+                        |e| log::error!(target: LOG_TARGET, "Add downloaded published file to file store failed: {e}"),
                     )
+                    .ok()?;
+
+                process_result_tx.take()?
+                    .send(true)
+                    .map_err(|e| {
+                        log::error!(target: LOG_TARGET, "Send response of process after download file[{file_id}] failed: {e:?}");
+                    })
                     .ok()?;
             }
         }
@@ -111,7 +123,8 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
             })
             .ok()?;
 
-        FsHelper::read_file_chunk(&chunks_directory, chunk_index)
+        FsHelper::read_file_chunk_async(&chunks_directory, chunk_index)
+            .await
             .map_err(|e| {
                 log::error!(target: LOG_TARGET, "Read chunk[{chunk_id}] at [{}] failed: {e}",
                     chunks_directory.display());
@@ -195,5 +208,17 @@ impl<F: file_store::Store + Send + Sync + 'static> FsServiceWorker<F> {
         }
 
         Ok(())
+    }
+}
+
+async fn asyncify<F, R>(f: F) -> std::io::Result<R>
+where
+    F: FnOnce() -> std::io::Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    let rt = Handle::current();
+    match rt.spawn_blocking(f).await {
+        Ok(res) => res,
+        Err(_) => Err(std::io::Error::other("background task failed")),
     }
 }

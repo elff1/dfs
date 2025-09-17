@@ -59,7 +59,7 @@ impl GrpcService {
             .await
             .unwrap_or_else(|e| log::error!(target: LOG_TARGET, "gRPC run into error: {e}"));
 
-        log::info!(target: LOG_TARGET, "gRPC service is stutting down...");
+        log::info!(target: LOG_TARGET, "gRPC service has shut down");
 
         Ok(())
     }

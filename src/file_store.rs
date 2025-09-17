@@ -21,8 +21,6 @@ pub enum FileStoreError {
     // DownloadingFileNotFound(u64),
 }
 
-// TODO:
-#[allow(dead_code)]
 pub trait Store {
     // published file
     fn add_published_file(&self, record: PublishedFileRecord) -> Result<(), FileStoreError>;
@@ -49,10 +47,10 @@ pub trait Store {
     fn add_downloading_file(&self, record: DownloadingFileRecord) -> Result<(), FileStoreError>;
     fn delete_downloading_file(&self, record: FileId) -> Result<(), FileStoreError>;
     fn downloading_file_exists(&self, file_id: FileId) -> Result<bool, FileStoreError>;
-    fn get_downloading_file(
-        &self,
-        file_id: FileId,
-    ) -> Result<Option<DownloadingFileRecord>, FileStoreError>;
+    // fn get_downloading_file(
+    //     &self,
+    //     file_id: FileId,
+    // ) -> Result<Option<DownloadingFileRecord>, FileStoreError>;
     fn get_all_downloading_files(
         &self,
     ) -> Result<impl Iterator<Item = DownloadingFileRecord> + Send, FileStoreError>;
